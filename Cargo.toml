@@ -1,0 +1,111 @@
+[package]
+name = "terra-siaga"
+version = "0.1.0"
+edition = "2021"
+authors = ["Terra Siaga Team"]
+description = "Terra Siaga - Emergency Response and Disaster Management System"
+license = "MIT"
+repository = "https://github.com/terra-siaga/terra-siaga"
+
+[dependencies]
+# Web framework
+actix-web = "4.4"
+actix-rt = "2.9"
+actix-cors = "0.6"
+actix-files = "0.6"
+
+# Database
+diesel = { version = "2.1", features = ["postgres", "uuid", "chrono", "serde_json", "r2d2"] }
+diesel_migrations = "2.1"
+r2d2 = "0.8"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID support
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Date and time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Password hashing
+bcrypt = "0.15"
+argon2 = "0.5"
+
+# JWT tokens
+jsonwebtoken = "9.2"
+
+# Environment variables
+dotenv = "0.15"
+config = "0.14"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Geographic calculations (for map features)
+geo = "0.27"
+geojson = "0.24"
+
+# HTTP client (for external APIs)
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# URL encoding
+urlencoding = "2.1"
+
+# Validation
+validator = { version = "0.17", features = ["derive"] }
+regex = "1.10"
+
+# Cache
+redis = { version = "0.24", features = ["tokio-comp"] }
+moka = { version = "0.12", features = ["future"] }
+deadpool-redis = "0.14"
+
+# Configuration management
+clap = { version = "4.4", features = ["derive"] }
+
+# Testing
+mockall = "0.12"
+
+# Security
+constant_time_eq = "0.3"
+
+# Rate limiting
+governor = "0.6"
+
+# Authentication middleware
+actix-web-httpauth = "0.8"
+
+# CPU count for worker configuration
+num_cpus = "1.16"
+
+# OpenAPI/Swagger documentation
+utoipa = { version = "4.0", features = ["actix_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "4.0", features = ["actix-web"] }
+
+[dev-dependencies]
+actix-rt = "2.9"
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
