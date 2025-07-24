@@ -7,7 +7,7 @@ use tracing::{error, info};
 
 
 use terra_siaga::{
-    config::AppConfig, infrastructure::AppContainer, presentation::api, shared::AppResult,
+    config::AppConfig, infrastructure::AppContainer, presentation::api,
 };
 
 #[actix_web::main]
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         e
     })?;
 
-    let container = Arc::new(container);
+    let app_data = web::Data::new(container);
 
     // Extract CORS origins to avoid lifetime issues
     let cors_origins = config.server.cors_origins.clone();
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start HTTP server
     let server = HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(container.clone()))
+            .app_data(app_data.clone())
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
             .wrap(middleware::NormalizePath::trim())
