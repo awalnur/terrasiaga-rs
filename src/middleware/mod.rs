@@ -5,10 +5,14 @@ pub mod auth;
 pub mod cors;
 pub mod logging;
 
+pub mod errors;
+
 // Re-export middleware functions and types
 pub use auth::jwt_middleware;
 pub use cors::configure_cors;
 pub use logging::{init_logger, configure_logger as configure_request_logger};
+pub use errors::{ErrorHandler};
+
 
 // Provide backward compatibility aliases
 pub use jwt_middleware as AuthMiddleware;

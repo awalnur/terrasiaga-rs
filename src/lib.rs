@@ -7,6 +7,9 @@ pub mod domain;
 // Application layer - use cases and application services
 pub mod application;
 
+// Handlers layer - HTTP request handlers and service coordination
+pub mod middleware;
+
 // Infrastructure layer - external concerns (database, web, etc.)
 pub mod infrastructure;
 

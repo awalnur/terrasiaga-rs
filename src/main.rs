@@ -8,11 +8,15 @@ use tracing::{error, info};
 
 use terra_siaga::{
     config::AppConfig, infrastructure::AppContainer, presentation::api,
+    middleware::cors,
+    middleware::errors  as error_middleware,
 };
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables from .env file
+    // This assumes the .env file is in the root of the project directory
+    // and contains necessary configuration like database URLs, server ports, etc.
     dotenv::dotenv().ok();
 
     // Initialize logging
@@ -47,24 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .wrap(middleware::Compress::default())
             .wrap(middleware::NormalizePath::trim())
             .wrap(
-                actix_cors::Cors::default()
-                    .allowed_origin_fn({
-                        let value = cors_origins.clone();
-                        move |origin, _req_head| {
-                            value
-                                .iter()
-                                .any(|allowed| origin.as_bytes().starts_with(allowed.as_bytes()))
-                        }
-                    })
-                    .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-                    .allowed_headers(vec![
-                        actix_web::http::header::AUTHORIZATION,
-                        actix_web::http::header::ACCEPT,
-                        actix_web::http::header::CONTENT_TYPE,
-                    ])
-                    .supports_credentials()
-                    .max_age(3600),
+                cors::configure_cors( )
             )
+            .wrap(error_middleware::ErrorHandler::new())
             .configure(api::configure_routes)
     })
     .bind(format!("{}:{}", config.server.host, config.server.port))?

@@ -7,6 +7,15 @@ description = "Terra Siaga - Emergency Response and Disaster Management System"
 license = "MIT"
 repository = "https://github.com/terra-siaga/terra-siaga"
 
+# Binary configurations
+[[bin]]
+name = "terra-siaga"
+path = "src/main.rs"
+
+#[[bin]]
+#name = "terra-siaga-cli"
+#path = "cli/main.rs"
+
 [dependencies]
 # Web framework
 actix-web = "4.4"
