@@ -43,9 +43,11 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Date and time
 chrono = { version = "0.4", features = ["serde"] }
 
-# Password hashing
+# Password hashing and security
 bcrypt = "0.15"
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["std"] }
+rand = "0.8"
+base64 = "0.22"
 
 # JWT tokens
 jsonwebtoken = "9.2"
