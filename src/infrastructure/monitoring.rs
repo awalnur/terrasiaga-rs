@@ -158,6 +158,7 @@ pub enum HealthStatus {
     Healthy,
     Degraded,
     Unhealthy,
+    Unknown,
 }
 
 /// Complete application health information
