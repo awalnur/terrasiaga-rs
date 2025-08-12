@@ -50,6 +50,66 @@ impl Default for SecurityConfig {
     }
 }
 
+/// Password service trait for dependency injection
+pub trait PasswordService: Send + Sync {
+    fn hash_password(&self, password: &str) -> Result<String, SecurityError>;
+    fn verify_password(&self, password: &str, hash: &str) -> Result<bool, SecurityError>;
+    fn validate_password_strength(&self, password: &str) -> Result<PasswordStrength, SecurityError>;
+    fn generate_secure_password(&self, length: usize) -> String;
+}
+
+/// Security service trait for general security operations
+pub trait SecurityService: Send + Sync {
+    fn generate_secure_token(&self, length: usize) -> String;
+    fn generate_uuid(&self) -> Uuid;
+    fn constant_time_compare(&self, a: &[u8], b: &[u8]) -> bool;
+    fn hash_data(&self, data: &[u8]) -> Vec<u8>;
+}
+
+/// Security errors
+#[derive(Error, Debug)]
+pub enum SecurityError {
+    #[error("Password hashing failed: {0}")]
+    HashingFailed(String),
+    #[error("Password verification failed: {0}")]
+    VerificationFailed(String),
+    #[error("Password too weak: {0}")]
+    WeakPassword(String),
+    #[error("Password too long (max {max} characters)")]
+    PasswordTooLong { max: usize },
+    #[error("Password too short (min {min} characters)")]
+    PasswordTooShort { min: usize },
+    #[error("Rate limit exceeded")]
+    RateLimitExceeded,
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+}
+
+/// Result type for security operations
+pub type SecurityResult<T> = Result<T, SecurityError>;
+
+/// Password strength assessment
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PasswordStrengthLevel {
+    VeryWeak,
+    Weak,
+    Medium,
+    Strong,
+    VeryStrong,
+}
+
+impl PasswordStrengthLevel {
+    pub fn score(&self) -> u8 {
+        match self {
+            PasswordStrengthLevel::VeryWeak => 1,
+            PasswordStrengthLevel::Weak => 2,
+            PasswordStrengthLevel::Medium => 3,
+            PasswordStrengthLevel::Strong => 4,
+            PasswordStrengthLevel::VeryStrong => 5,
+        }
+    }
+}
+
 /// Password strength requirements
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasswordStrength {
@@ -98,33 +158,6 @@ struct AttemptRecord {
     last_attempt: Instant,
 }
 
-/// Security errors
-#[derive(Error, Debug)]
-pub enum SecurityError {
-    #[error("Password hashing failed: {message}")]
-    HashingFailed { message: String },
-
-    #[error("Password verification failed: {message}")]
-    VerificationFailed { message: String },
-
-    #[error("Password validation failed: {issues:?}")]
-    ValidationFailed { issues: Vec<String> },
-
-    #[error("Rate limit exceeded for identifier: {identifier}")]
-    RateLimitExceeded { identifier: String },
-
-    #[error("Password too weak: score {score}/100")]
-    WeakPassword { score: u8 },
-
-    #[error("Security configuration error: {message}")]
-    ConfigurationError { message: String },
-
-    #[error("Cryptographic error: {message}")]
-    CryptographicError { message: String },
-}
-
-pub type SecurityResult<T> = Result<T, SecurityError>;
-
 /// Main password security service
 #[derive(Clone,Debug)]
 pub struct PasswordSecurity {
@@ -166,22 +199,22 @@ impl PasswordSecurity {
     pub fn hash_password(&self, password: &str) -> SecurityResult<String> {
         // Validate password length
         if password.len() > self.config.max_password_length {
-            return Err(SecurityError::ValidationFailed {
-                issues: vec![format!("Password exceeds maximum length of {}", self.config.max_password_length)],
+            return Err(SecurityError::PasswordTooLong {
+                max: self.config.max_password_length,
             });
         }
 
         if password.len() < self.config.min_password_length {
-            return Err(SecurityError::ValidationFailed {
-                issues: vec![format!("Password is shorter than minimum length of {}", self.config.min_password_length)],
+            return Err(SecurityError::PasswordTooShort {
+                min: self.config.min_password_length,
             });
         }
 
         // Validate password strength
         let validation = self.validate_password_strength(password);
         if !validation.is_valid {
-            return Err(SecurityError::ValidationFailed {
-                issues: validation.issues,
+            return Err(SecurityError::WeakPassword {
+                score: validation.score,
             });
         }
 
@@ -420,9 +453,7 @@ impl PasswordSecurity {
                     last_attempt: now,
                 });
             } else if record.count >= self.config.max_attempts {
-                return Err(SecurityError::RateLimitExceeded {
-                    identifier: identifier.to_string(),
-                });
+                return Err(SecurityError::RateLimitExceeded);
             }
         }
 

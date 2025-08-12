@@ -7,6 +7,7 @@ pub mod whatsapp;
 pub mod weather;
 pub mod geolocation;
 pub mod notification;
+pub mod notification_service;
 
 use crate::shared::error::{AppResult, AppError};
 use serde::{Deserialize, Serialize};

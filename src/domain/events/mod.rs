@@ -222,11 +222,3 @@ pub trait EventPublisher: Send + Sync {
 pub trait EventHandler<T: DomainEvent>: Send + Sync {
     async fn handle(&self, event: &T) -> crate::shared::AppResult<()>;
 }
-
-// Re-export all events and traits
-pub use self::{
-    UserRegisteredEvent, UserActivatedEvent, UserDeactivatedEvent,
-    DisasterReportedEvent, DisasterStatusUpdatedEvent, EmergencyResponseDispatchedEvent,
-    NotificationSentEvent, MassNotificationTriggeredEvent, LocationUpdatedEvent,
-    DomainEvent, AggregateRoot, EventStore, EventPublisher, EventHandler
-};

@@ -10,7 +10,8 @@ pub trait AuthService: Send + Sync {
     async fn hash_password(&self, password: &str) -> AppResult<String>;
     async fn verify_password(&self, password: &str, hash: &str) -> AppResult<bool>;
     async fn generate_tokens(&self, user_id: UserId) -> AppResult<TokenPair>;
-    async fn validate_token(&self, token: &str) -> AppResult<TokenClaims>;
+    async fn generate_token(&self, user: &crate::domain::entities::User) -> AppResult<String>; // Add missing method
+    async fn validate_token(&self, token: &str) -> AppResult<UserId>; // Fix return type to match implementation
     async fn refresh_token(&self, refresh_token: &str) -> AppResult<TokenPair>;
     async fn revoke_token(&self, token: &str) -> AppResult<()>;
 }
@@ -56,24 +57,24 @@ pub trait WeatherService: Send + Sync {
     async fn get_weather_alerts(&self, coordinates: Coordinates) -> AppResult<Vec<WeatherAlert>>;
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WeatherData {
     pub temperature: f64,
     pub humidity: f64,
     pub wind_speed: f64,
-    pub wind_direction: f64,
-    pub pressure: f64,
-    pub visibility: f64,
-    pub condition: String,
+    pub wind_direction: String,
+    pub conditions: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WeatherAlert {
     pub alert_type: String,
     pub severity: String,
-    pub title: String,
     pub description: String,
     pub start_time: chrono::DateTime<chrono::Utc>,
-    pub end_time: chrono::DateTime<chrono::Utc>,
+    pub end_time: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+// Type alias for backward compatibility
+pub type GeoService = dyn GeolocationService;

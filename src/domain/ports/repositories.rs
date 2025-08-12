@@ -41,6 +41,10 @@ pub trait UserRepository: Repository<User, UserId> + Send + Sync {
     async fn verify_email(&self, id: UserId) -> AppResult<bool>;
     async fn update_password(&self, id: UserId, password_hash: &str) -> AppResult<bool>;
     async fn count_by_role(&self, role: crate::domain::entities::user::UserRole) -> AppResult<u64>;
+
+    // Add missing methods that are implemented in user_repository.rs
+    async fn find_users_in_radius(&self, center: &crate::domain::value_objects::Coordinates, radius_km: f64) -> AppResult<Vec<User>>;
+    async fn count_by_status(&self, status: &str) -> AppResult<u64>;
 }
 
 // Location repository interface
@@ -71,6 +75,9 @@ pub trait NotificationRepository: Repository<Notification, NotificationId> + Sen
     async fn find_unread_by_recipient(&self, recipient_id: UserId) -> AppResult<Vec<Notification>>;
 
     async fn find_by_channel(&self, channel: NotificationChannel) -> AppResult<Vec<Notification>>;
+
+    // Add missing method found_by_user from container.rs
+    async fn find_by_user(&self, user_id: &UserId, limit: Option<u32>) -> AppResult<Vec<Notification>>;
 }
 
 /// Analytics repository interface for complex queries and reporting

@@ -40,6 +40,47 @@ impl fmt::Display for Email {
     }
 }
 
+/// Username value object with validation
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Username(String);
+
+impl Username {
+    pub fn new(username: String) -> AppResult<Self> {
+        let username = username.trim().to_string();
+        
+        if username.is_empty() {
+            return Err(AppError::Validation("Username cannot be empty".to_string()));
+        }
+        
+        if username.len() < 3 {
+            return Err(AppError::Validation("Username must be at least 3 characters".to_string()));
+        }
+        
+        if username.len() > 50 {
+            return Err(AppError::Validation("Username cannot exceed 50 characters".to_string()));
+        }
+        
+        let username_regex = Regex::new(r"^[a-zA-Z0-9_-]+$")
+            .map_err(|_| AppError::Internal("Regex compilation failed".to_string()))?;
+        
+        if !username_regex.is_match(&username) {
+            return Err(AppError::Validation("Username can only contain letters, numbers, underscores, and hyphens".to_string()));
+        }
+        
+        Ok(Username(username))
+    }
+    
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Username {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Phone number value object with international format support
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PhoneNumber(String);
@@ -278,8 +319,5 @@ impl NotificationId {
     }
 }
 
-// Re-export commonly used value objects
-pub use self::{
-    Email, PhoneNumber, Coordinates, Address, DisasterSeverity, UserRole,
-    UserId, DisasterId, LocationId, NotificationId
-};
+// Note: Remove re-exports to avoid conflicts since these types are already defined above
+// The types are accessible directly from this module without re-exporting

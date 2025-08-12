@@ -23,31 +23,31 @@ scrape_configs:
     scrape_interval: 10s
     scrape_timeout: 5s
     scheme: http
-
+    
   # System metrics from node exporter
   - job_name: 'node-exporter'
     static_configs:
       - targets: ['node-exporter:9100']
     scrape_interval: 15s
-
+    
   # PostgreSQL metrics
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
     scrape_interval: 15s
-
+    
   # Redis metrics
   - job_name: 'redis'
     static_configs:
       - targets: ['redis-exporter:9121']
     scrape_interval: 15s
-
+    
   # Nginx metrics
   - job_name: 'nginx'
     static_configs:
       - targets: ['nginx-exporter:9113']
     scrape_interval: 15s
-
+    
   # Prometheus self-monitoring
   - job_name: 'prometheus'
     static_configs:

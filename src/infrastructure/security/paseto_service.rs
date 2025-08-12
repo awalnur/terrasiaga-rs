@@ -3,13 +3,11 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use pasetors::keys::{SymmetricKey, AsymmetricSecretKey, AsymmetricPublicKey};
 use pasetors::token::{UntrustedToken, TrustedToken};
-use pasetors::{Local, Public, version4::{V4, encrypt, decrypt, sign, verify}};
-use pasetors::claims::{Claims, ClaimsValidationRules};
-use pasetors::footer::Footer;
+use pasetors::{Local, Public, version4::V4};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::{rand_core::OsRng, SaltString};
 use uuid::Uuid;
@@ -108,13 +106,13 @@ impl PasetoSecurityService {
     pub fn new(config: PasetoConfig, cache: Arc<dyn CacheService>) -> AppResult<Self> {
         // Initialize PASETO keys
         let local_key = SymmetricKey::<V4>::from(&config.local_key)
-            .map_err(|e| AppError::Internal(format!("Invalid local key: {}", e)))?;
+            .map_err(|e| AppError::InternalServer(format!("Invalid local key: {}", e)))?;
         
         let (private_key, public_key) = if !config.use_local_tokens {
             let private_key = AsymmetricSecretKey::<V4>::from(&config.private_key)
-                .map_err(|e| AppError::Internal(format!("Invalid private key: {}", e)))?;
+                .map_err(|e| AppError::InternalServer(format!("Invalid private key: {}", e)))?;
             let public_key = AsymmetricPublicKey::<V4>::from(&config.public_key)
-                .map_err(|e| AppError::Internal(format!("Invalid public key: {}", e)))?;
+                .map_err(|e| AppError::InternalServer(format!("Invalid public key: {}", e)))?;
             (Some(private_key), Some(public_key))
         } else {
             (None, None)
@@ -229,19 +227,19 @@ impl PasetoSecurityService {
 
         // Create PASETO token
         let claims_json = serde_json::to_string(&claims)
-            .map_err(|e| AppError::Internal(format!("Failed to serialize claims: {}", e)))?;
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?;
 
         let token = if self.config.use_local_tokens {
             // Use encrypted local tokens (v4.local)
-            encrypt(&self.local_key, claims_json.as_bytes(), None, None)
-                .map_err(|e| AppError::Internal(format!("PASETO encryption failed: {}", e)))?
+            pasetors::local::encrypt(&self.local_key, claims_json.as_bytes(), None, None)
+                .map_err(|e| AppError::InternalServer(format!("PASETO encryption failed: {}", e)))?
         } else {
             // Use signed public tokens (v4.public)
             if let Some(private_key) = &self.private_key {
-                sign(private_key, claims_json.as_bytes(), None, None)
-                    .map_err(|e| AppError::Internal(format!("PASETO signing failed: {}", e)))?
+                pasetors::public::sign(private_key, claims_json.as_bytes(), None, None)
+                    .map_err(|e| AppError::InternalServer(format!("PASETO signing failed: {}", e)))?
             } else {
-                return Err(AppError::Internal("Private key not available for public tokens".to_string()));
+                return Err(AppError::InternalServer("Private key not available for public tokens".to_string()));
             }
         };
 
@@ -252,12 +250,12 @@ impl PasetoSecurityService {
     pub async fn validate_paseto_token(&self, token: &str) -> AppResult<SecureAuthSession> {
         // Parse and validate PASETO token
         let untrusted_token = UntrustedToken::<Local, V4>::try_from(token)
-            .or_else(|_| UntrustedToken::<Public, V4>::try_from(token))
+            .or_else(|_| UntrustedToken::<Local, V4>::try_from(token))
             .map_err(|e| AppError::Unauthorized(format!("Invalid token format: {}", e)))?;
 
         let trusted_token = if self.config.use_local_tokens {
             // Decrypt local token
-            let decrypted = decrypt(&self.local_key, &untrusted_token, None, None)
+            let decrypted = pasetors::local::decrypt(&self.local_key, &untrusted_token, None, None)
                 .map_err(|e| AppError::Unauthorized(format!("Token decryption failed: {}", e)))?;
             
             TrustedToken::try_from(&decrypted)
@@ -265,13 +263,13 @@ impl PasetoSecurityService {
         } else {
             // Verify public token
             if let Some(public_key) = &self.public_key {
-                let verified = verify(public_key, &untrusted_token, None, None)
+                let verified = pasetors::public::verify(public_key, &untrusted_token, None, None)
                     .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?;
                 
                 TrustedToken::try_from(&verified)
                     .map_err(|e| AppError::Unauthorized(format!("Invalid token structure: {}", e)))?
             } else {
-                return Err(AppError::Internal("Public key not available for token verification".to_string()));
+                return Err(AppError::InternalServer("Public key not available for token verification".to_string()));
             }
         };
 
@@ -367,7 +365,7 @@ impl AuthService for PasetoSecurityService {
         let salt = SaltString::generate(&mut OsRng);
         let password_hash = self.argon2
             .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| AppError::Internal(format!("Password hashing failed: {}", e)))?
+            .map_err(|e| AppError::InternalServer(format!("Password hashing failed: {}", e)))?
             .to_string();
 
         Ok(password_hash)
@@ -375,7 +373,7 @@ impl AuthService for PasetoSecurityService {
 
     async fn verify_password(&self, password: &str, hash: &str) -> AppResult<bool> {
         let parsed_hash = PasswordHash::new(hash)
-            .map_err(|e| AppError::Internal(format!("Invalid password hash: {}", e)))?;
+            .map_err(|e| AppError::InternalServer(format!("Invalid password hash: {}", e)))?;
 
         match self.argon2.verify_password(password.as_bytes(), &parsed_hash) {
             Ok(_) => Ok(true),

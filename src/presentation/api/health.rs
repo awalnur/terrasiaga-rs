@@ -6,7 +6,7 @@ use serde_json::json;
 use chrono::Utc;
 use std::sync::Arc;
 
-use crate::infrastructure::monitoring::health::HealthMonitoringService;
+use crate::infrastructure::monitoring::HealthMonitoringService;
 
 #[get("/health")]
 pub async fn health_check(

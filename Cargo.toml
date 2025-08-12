@@ -52,6 +52,45 @@ base64 = "0.22"
 # PASETO tokens (replacing JWT)
 pasetors = { version = "0.7.7", features = ["v4", "std"] }
 
+# Remove JWT dependency
+# jsonwebtoken = "8.3"
+
+# Add additional security and utility dependencies
+ring = "0.17"
+constant_time_eq = "0.4.2"
+zeroize = { version = "1.6", features = ["derive"] }
+
+# Enhanced error handling
+color-eyre = "0.6"
+
+# Configuration management
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Time utilities
+time = { version = "0.3", features = ["serde", "macros"] }
+
+# Geographic and spatial data
+geo-types = "0.7"
+rstar = "0.12.2"
+
+# Rate limiting and middleware
+tower = "0.5.2"
+tower-service = "0.3.2"
+tower-http = { version = "0.6.6", features = ["cors", "trace", "request-id"] }
+
+# Event sourcing and CQRS
+async-stream = "0.3"
+crossbeam-channel = "0.5"
+
+# Monitoring and observability
+metrics = "0.24.2"
+metrics-exporter-prometheus = "0.17.2"
+opentelemetry = "0.21"
+tracing-opentelemetry = "0.22"
+
+# Additional validation
+garde = { version = "0.18", features = ["derive"] }
+
 # Environment variables
 dotenv = "0.15"
 config = "0.14"
@@ -92,8 +131,6 @@ toml = "0.9.5"
 # Testing
 mockall = "0.13.1"
 
-# Security
-constant_time_eq = "0.4.2"
 
 # Rate limiting
 governor = "0.10.1"
@@ -107,6 +144,13 @@ num_cpus = "1.16"
 # OpenAPI/Swagger documentation
 utoipa = { version = "5.4.0", features = ["actix_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
+futures-util = "0.3.31"
+rand_chacha = "0.9.0"
+sha2 = "0.10.9"
+pbkdf2 = "0.12.2"
+nonzero = "0.2.0"
+jsonwebtoken = "9.3.1"
+deadpool-diesel = "0.6.1"
 
 [dev-dependencies]
 actix-rt = "2.10.0"

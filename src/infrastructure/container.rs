@@ -6,22 +6,25 @@ use actix_web::web;
 
 use crate::config::AppConfig;
 use crate::infrastructure::{
-    cache::{CacheService, RedisCache, InMemoryCache, HybridCache},
-    security::{PasetoSecurityService, PasetoConfig, SecurityServiceFactory},
-    monitoring::health::{HealthMonitoringService, DatabaseHealthCheck, CacheHealthCheck},
-    external_services::notification_service::ExternalNotificationService,
+    cache::{CacheService, CacheConfig},
+    monitoring::health::{HealthService, CacheHealthChecker, DatabaseHealthChecker},
+    external_services::{
+        notification_service::ExternalNotificationService,
+        SmsConfig, EmailConfig, WhatsAppConfig,
+    },
+    security::paseto_service::{PasetoSecurityService, PasetoConfig},
     repository::user_repository::PostgresUserRepository,
 };
-use crate::application::use_cases::{
-    RegisterUserUseCase, UpdateUserProfileUseCase, ChangeUserStatusUseCase,
-    ReportDisasterUseCase, UpdateDisasterStatusUseCase, GetNearbyDisastersUseCase,
-    DispatchEmergencyResponseUseCase, SendEmergencyAlertUseCase, SendCustomNotificationUseCase,
+use crate::domain::{
+    ports::{
+        repositories::{UserRepository, DisasterRepository, NotificationRepository},
+        services::{AuthService, NotificationService, GeolocationService as GeoService},
+    },
+    value_objects::Coordinates,
 };
-use crate::domain::ports::{
-    repositories::{UserRepository, DisasterRepository, NotificationRepository},
-    services::{AuthService, NotificationService, GeoService},
-};
-use crate::shared::{AppResult, AppError};
+use crate::shared::{AppResult, AppError, cache::CacheFactory};
+use crate::application::use_cases::*;
+use crate::infrastructure::monitoring::{CacheHealthCheck, DatabaseHealthCheck, HealthMonitoringService};
 
 /// Application container holding all dependencies
 pub struct AppContainer {
@@ -30,7 +33,7 @@ pub struct AppContainer {
     pub paseto_service: Arc<PasetoSecurityService>,
     pub cache_service: Arc<dyn CacheService>,
     pub notification_service: Arc<dyn NotificationService>,
-    pub health_monitoring: Arc<HealthMonitoringService>,
+    pub health_monitoring: Arc<HealthService>,
 
     // Repositories
     pub user_repository: Arc<dyn UserRepository>,
@@ -68,7 +71,7 @@ impl AppContainer {
 
         // Build PASETO security service
         let paseto_config = Self::build_paseto_config(config)?;
-        let paseto_service = SecurityServiceFactory::create_paseto_service(
+        let paseto_service = PasetoSecurityService::new(
             paseto_config,
             cache_service.clone(),
         )?;
@@ -180,32 +183,20 @@ impl AppContainer {
     }
 
     /// Build cache service based on configuration
-    async fn build_cache_service(config: &AppConfig) -> AppResult<Box<dyn CacheService>> {
-        if config.is_production() {
-            // Use Redis in production
-            let redis_cache = RedisCache::new(
-                &config.redis_url(),
-                std::time::Duration::from_secs(3600), // 1 hour default TTL
-                format!("terra_siaga:{}", config.environment),
-            )?;
+    async fn build_cache_service(config: &AppConfig) -> AppResult<impl CacheService> {
+        let cache_config = CacheConfig {
+            redis_url: if config.is_production() {
+                Some(config.redis_url())
+            } else {
+                None
+            },
+            redis_pool_size: Some(10),
+            memory_cache_capacity: if config.is_production() { 10000 } else { 1000 },
+            default_ttl_seconds: if config.is_production() { 3600 } else { 600 },
+            key_prefix: format!("terra_siaga:{}", config.environment),
+        };
 
-            // Also create in-memory cache for L2 caching
-            let memory_cache = InMemoryCache::new(
-                10000, // 10k entries max
-                std::time::Duration::from_secs(300), // 5 minutes TTL
-            );
-
-            // Use hybrid cache for best performance
-            let hybrid_cache = HybridCache::new(redis_cache, memory_cache, true);
-            Ok(Box::new(hybrid_cache))
-        } else {
-            // Use in-memory cache for development
-            let memory_cache = InMemoryCache::new(
-                1000, // 1k entries max for dev
-                std::time::Duration::from_secs(600), // 10 minutes TTL
-            );
-            Ok(Box::new(memory_cache))
-        }
+        CacheFactory::create(&cache_config).await
     }
 
     /// Build PASETO configuration
@@ -230,7 +221,7 @@ impl AppContainer {
 
     /// Build notification service with all providers
     fn build_notification_service(config: &AppConfig) -> AppResult<ExternalNotificationService> {
-        let sms_config = crate::infrastructure::external_services::notification_service::SmsConfig {
+        let sms_config = SmsConfig {
             provider: config.sms_provider.provider.clone(),
             api_key: config.sms_provider.api_key.clone(),
             api_secret: config.sms_provider.api_secret.clone(),
@@ -238,7 +229,7 @@ impl AppContainer {
             base_url: config.sms_provider.base_url.clone(),
         };
 
-        let email_config = crate::infrastructure::external_services::notification_service::EmailConfig {
+        let email_config = EmailConfig {
             smtp_host: config.email.smtp_host.clone(),
             smtp_port: config.email.smtp_port,
             username: config.email.username.clone(),
@@ -247,15 +238,7 @@ impl AppContainer {
             from_name: config.email.from_name.clone(),
         };
 
-        let push_config = crate::infrastructure::external_services::notification_service::PushConfig {
-            firebase_server_key: config.push_notifications.firebase_server_key.clone(),
-            firebase_sender_id: config.push_notifications.firebase_sender_id.clone(),
-            apns_key_id: config.push_notifications.apns_key_id.clone().unwrap_or_default(),
-            apns_team_id: config.push_notifications.apns_team_id.clone().unwrap_or_default(),
-            apns_bundle_id: config.push_notifications.apns_bundle_id.clone().unwrap_or_default(),
-        };
-
-        let whatsapp_config = crate::infrastructure::external_services::notification_service::WhatsAppConfig {
+        let whatsapp_config = WhatsAppConfig {
             access_token: config.whatsapp.access_token.clone(),
             phone_number_id: config.whatsapp.phone_number_id.clone(),
             business_account_id: config.whatsapp.business_account_id.clone(),
@@ -265,7 +248,6 @@ impl AppContainer {
         Ok(ExternalNotificationService::new(
             sms_config,
             email_config,
-            push_config,
             whatsapp_config,
         ))
     }
@@ -282,8 +264,8 @@ impl AppContainer {
         );
 
         // Add health checks
-        monitoring.add_check(Arc::new(DatabaseHealthCheck::new(database_pool)));
-        monitoring.add_check(Arc::new(CacheHealthCheck::new(cache_service)));
+        monitoring.add_check(Arc::new(DatabaseHealthChecker::new(database_pool)));
+        monitoring.add_check(Arc::new(CacheHealthChecker::new(cache_service)));
 
         // Add external API health checks
         if !config.external_apis.disaster_api_endpoints.is_empty() {

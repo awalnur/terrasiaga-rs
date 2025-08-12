@@ -7,6 +7,7 @@ pub mod messaging;
 pub mod external_services;
 pub mod repository;
 pub mod monitoring;
+pub mod security;
 
 // Dependency injection container
 pub mod container;
@@ -16,8 +17,13 @@ pub use container::*;
 pub use database::{DatabaseService, DatabaseConfig};
 pub use cache::{CacheService, CacheConfig};
 pub use external_services::{ExternalServicesManager, ExternalServicesConfig};
-pub use monitoring::{HealthMonitor, HealthCheckScheduler, ApplicationHealth};
+pub use monitoring::{HealthService, HealthStatus, HealthReport, ComponentHealth};
+pub use security::{PasetoSecurityService, PasetoConfig, SecurityServiceFactory};
+
+// Type aliases for backward compatibility
+pub type HealthMonitor = monitoring::HealthService;
+pub type HealthCheckScheduler = monitoring::HealthService;
+pub type ApplicationHealth = monitoring::HealthReport;
 
 // External API integrations
 pub mod external_api;
-
