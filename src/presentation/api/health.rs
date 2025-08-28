@@ -6,25 +6,29 @@ use serde_json::json;
 use chrono::Utc;
 use std::sync::Arc;
 
-use crate::infrastructure::monitoring::HealthMonitoringService;
+use crate::infrastructure::monitoring::{HealthMonitoringService, HealthStatus};
 
+#[tracing::instrument(name = "health_check", skip(monitoring_service))]
 #[get("/health")]
 pub async fn health_check(
     monitoring_service: web::Data<Arc<HealthMonitoringService>>,
 ) -> Result<HttpResponse> {
+    println!("Health check");
+    // Perform async health check across components
     let health = monitoring_service.check_health().await;
 
     let status_code = match health.overall_status {
-        crate::infrastructure::monitoring::HealthStatus::Healthy => 200,
-        crate::infrastructure::monitoring::HealthStatus::Degraded => 200,
-        crate::infrastructure::monitoring::HealthStatus::Unhealthy => 503,
-        crate::infrastructure::monitoring::HealthStatus::Unknown => 503,
+        HealthStatus::Healthy => 200,
+        HealthStatus::Degraded => 200,
+        HealthStatus::Unhealthy => 503,
+        HealthStatus::Critical => 503,
     };
 
+    println!("{:?}", health);
     Ok(HttpResponse::build(actix_web::http::StatusCode::from_u16(status_code).unwrap())
         .json(json!({
             "status": health.overall_status,
-            "timestamp": health.checked_at,
+            "timestamp": health.timestamp,
             "service": "terra-siaga",
             "version": health.version,
             "uptime_seconds": health.uptime_seconds,
@@ -37,20 +41,18 @@ pub async fn health_check(
 pub async fn readiness_check(
     monitoring_service: web::Data<Arc<HealthMonitoringService>>,
 ) -> Result<HttpResponse> {
-    let is_ready = monitoring_service.is_ready().await;
-
-    if is_ready {
-        Ok(HttpResponse::Ok().json(json!({
+    // readiness_check returns AppResult; Ok means ready
+    match monitoring_service.readiness_check().await {
+        Ok(_) => Ok(HttpResponse::Ok().json(json!({
             "status": "ready",
             "timestamp": Utc::now(),
             "message": "Service is ready to accept traffic"
-        })))
-    } else {
-        Ok(HttpResponse::ServiceUnavailable().json(json!({
+        }))),
+        Err(_e) => Ok(HttpResponse::ServiceUnavailable().json(json!({
             "status": "not_ready",
             "timestamp": Utc::now(),
             "message": "Service is not ready to accept traffic"
-        })))
+        }).to_string())),
     }
 }
 
@@ -58,20 +60,17 @@ pub async fn readiness_check(
 pub async fn liveness_check(
     monitoring_service: web::Data<Arc<HealthMonitoringService>>,
 ) -> Result<HttpResponse> {
-    let is_alive = monitoring_service.is_alive().await;
-
-    if is_alive {
-        Ok(HttpResponse::Ok().json(json!({
+    match monitoring_service.liveness_check().await {
+        Ok(_) => Ok(HttpResponse::Ok().json(json!({
             "status": "alive",
             "timestamp": Utc::now(),
             "message": "Service is alive"
-        })))
-    } else {
-        Ok(HttpResponse::ServiceUnavailable().json(json!({
+        }))),
+        Err(_e) => Ok(HttpResponse::ServiceUnavailable().json(json!({
             "status": "dead",
             "timestamp": Utc::now(),
             "message": "Service is not responding"
-        })))
+        }))),
     }
 }
 
@@ -79,10 +78,11 @@ pub async fn liveness_check(
 pub async fn metrics_endpoint(
     monitoring_service: web::Data<Arc<HealthMonitoringService>>,
 ) -> Result<HttpResponse> {
-    let metrics = monitoring_service.get_metrics().await;
+    // Provide a lightweight status metric snapshot
+    let status = monitoring_service.quick_check().await;
 
     Ok(HttpResponse::Ok().json(json!({
-        "metrics": metrics,
-        "collected_at": metrics.collected_at
+        "status": status,
+        "collected_at": Utc::now()
     })))
 }

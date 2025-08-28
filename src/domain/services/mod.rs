@@ -4,7 +4,7 @@
 use crate::shared::{AppResult, UserId};
 use crate::domain::entities::{Disaster, Location, User};
 use crate::domain::entities::disaster::{DisasterType, DisasterSeverity};
-use crate::domain::entities::user::UserRole;
+use crate::UserRole;
 
 /// Disaster Assessment Service - Evaluates disaster severity and impact
 pub struct DisasterAssessmentService;
@@ -94,7 +94,7 @@ impl EmergencyCoordinationService {
         // Role-based scoring
         score += match responder.role {
             UserRole::Volunteer => 10.0,
-            UserRole::Official => 15.0,
+            UserRole::OrgAdmin => 15.0,
             _ => 5.0,
         };
         
@@ -135,7 +135,8 @@ impl RiskCalculationService {
             DisasterSeverity::Moderate => 1.0,
             DisasterSeverity::Major => 1.5,
             DisasterSeverity::Severe => 2.0,
-            DisasterSeverity::Catastrophic => 3.0,
+            DisasterSeverity::Critical => 2.5,
+            DisasterSeverity::Catastrophic => 3.0
         };
         
         base_radius * severity_multiplier

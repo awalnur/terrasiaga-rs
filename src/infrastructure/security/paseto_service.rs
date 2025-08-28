@@ -1,23 +1,21 @@
 /// PASETO-based security service for Terra Siaga
 /// Provides more secure token management compared to JWT with built-in encryption
 
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use pasetors::keys::{SymmetricKey, AsymmetricSecretKey, AsymmetricPublicKey};
-use pasetors::token::{UntrustedToken, TrustedToken};
+use pasetors::token::UntrustedToken;
 use pasetors::{Local, Public, version4::V4};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{rand_core::OsRng, SaltString};
+use pasetors::claims::{Claims, ClaimsValidationRules};
+use argon2::Argon2;
 use uuid::Uuid;
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
-
 use crate::domain::entities::User;
-use crate::domain::value_objects::{UserId, UserRole, Email};
-use crate::domain::ports::services::AuthService;
-use crate::infrastructure::cache::CacheService;
+use crate::domain::value_objects::{ UserRole, Email};
+use crate::infrastructure::cache::{CacheService};
 use crate::shared::{AppResult, AppError};
+use crate::UserId;
 
 /// PASETO token claims structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,7 +68,7 @@ impl Default for PasetoConfig {
         // Generate secure random keys (in production, these should be from config)
         let local_key = (0..32).map(|_| rand::random::<u8>()).collect();
         let (public_key, private_key) = Self::generate_asymmetric_keys();
-        
+
         Self {
             local_key,
             public_key,
@@ -107,7 +105,7 @@ impl PasetoSecurityService {
         // Initialize PASETO keys
         let local_key = SymmetricKey::<V4>::from(&config.local_key)
             .map_err(|e| AppError::InternalServer(format!("Invalid local key: {}", e)))?;
-        
+
         let (private_key, public_key) = if !config.use_local_tokens {
             let private_key = AsymmetricSecretKey::<V4>::from(&config.private_key)
                 .map_err(|e| AppError::InternalServer(format!("Invalid private key: {}", e)))?;
@@ -152,13 +150,6 @@ impl PasetoSecurityService {
                 "receive_notifications".to_string(),
                 "volunteer_response".to_string(),
             ],
-            UserRole::Responder => vec![
-                "report_disaster".to_string(),
-                "view_disasters".to_string(),
-                "receive_notifications".to_string(),
-                "respond_to_disaster".to_string(),
-                "update_disaster_status".to_string(),
-            ],
             UserRole::Admin => vec![
                 "report_disaster".to_string(),
                 "view_disasters".to_string(),
@@ -169,9 +160,15 @@ impl PasetoSecurityService {
                 "manage_disasters".to_string(),
                 "send_emergency_alerts".to_string(),
             ],
+            UserRole::SystemAdmin => vec![
+                "all_permissions".to_string(),
+
+            ],
             UserRole::SuperAdmin => vec![
                 "all_permissions".to_string(),
             ],
+            _ => vec![]
+
         }
     }
 
@@ -192,7 +189,7 @@ impl PasetoSecurityService {
 
         // Create token claims
         let claims = PasetoTokenClaims {
-            sub: user.id().value().to_string(),
+            sub: user.id().to_string(),
             email: user.email().value().to_string(),
             role: format!("{:?}", user.role()),
             session_id: session_id.clone(),
@@ -206,7 +203,7 @@ impl PasetoSecurityService {
 
         // Store session in cache
         let session = SecureAuthSession {
-            user_id: user.id(),
+            user_id: user.id.clone(),
             email: user.email().clone(),
             role: user.role().clone(),
             session_id: session_id.clone(),
@@ -223,20 +220,25 @@ impl PasetoSecurityService {
         };
 
         let session_key = format!("session:{}", session_id);
-        self.cache.set(&session_key, &session, Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
+        let session_json = serde_json::to_string(&session)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize session: {}", e)))?;
+
+        self.cache.set_string(&session_key, session_json, Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
 
         // Create PASETO token
         let claims_json = serde_json::to_string(&claims)
             .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?;
 
+
+        let paseto_claims = Claims::from_bytes(claims_json.as_bytes()).map_err(|e| AppError::InternalServer(format!("Failed to create PASETO claims: {}", e)))?;
         let token = if self.config.use_local_tokens {
             // Use encrypted local tokens (v4.local)
-            pasetors::local::encrypt(&self.local_key, claims_json.as_bytes(), None, None)
+            pasetors::local::encrypt(&self.local_key, &paseto_claims, None, None)
                 .map_err(|e| AppError::InternalServer(format!("PASETO encryption failed: {}", e)))?
         } else {
             // Use signed public tokens (v4.public)
             if let Some(private_key) = &self.private_key {
-                pasetors::public::sign(private_key, claims_json.as_bytes(), None, None)
+                pasetors::public::sign(private_key, &paseto_claims, None, None)
                     .map_err(|e| AppError::InternalServer(format!("PASETO signing failed: {}", e)))?
             } else {
                 return Err(AppError::InternalServer("Private key not available for public tokens".to_string()));
@@ -248,33 +250,31 @@ impl PasetoSecurityService {
 
     /// Validate PASETO token and return session
     pub async fn validate_paseto_token(&self, token: &str) -> AppResult<SecureAuthSession> {
-        // Parse and validate PASETO token
-        let untrusted_token = UntrustedToken::<Local, V4>::try_from(token)
-            .or_else(|_| UntrustedToken::<Local, V4>::try_from(token))
-            .map_err(|e| AppError::Unauthorized(format!("Invalid token format: {}", e)))?;
-
         let trusted_token = if self.config.use_local_tokens {
-            // Decrypt local token
-            let decrypted = pasetors::local::decrypt(&self.local_key, &untrusted_token, None, None)
-                .map_err(|e| AppError::Unauthorized(format!("Token decryption failed: {}", e)))?;
-            
-            TrustedToken::try_from(&decrypted)
-                .map_err(|e| AppError::Unauthorized(format!("Invalid token structure: {}", e)))?
+            // Parse as local token and decrypt
+            let untrusted_token = UntrustedToken::<Local, V4>::try_from(token)
+                .map_err(|e| AppError::Unauthorized(format!("Invalid local token format: {}", e)))?;
+
+            // Decrypt local token with proper parameters
+            let validation_rules = ClaimsValidationRules::new();
+            pasetors::local::decrypt(&self.local_key, &untrusted_token, &validation_rules, None, None)
+                .map_err(|e| AppError::Unauthorized(format!("Token decryption failed: {}", e)))?
         } else {
-            // Verify public token
+            // Parse as public token and verify
+            let untrusted_token = UntrustedToken::<Public, V4>::try_from(token)
+                .map_err(|e| AppError::Unauthorized(format!("Invalid public token format: {}", e)))?;
+
             if let Some(public_key) = &self.public_key {
-                let verified = pasetors::public::verify(public_key, &untrusted_token, None, None)
-                    .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?;
-                
-                TrustedToken::try_from(&verified)
-                    .map_err(|e| AppError::Unauthorized(format!("Invalid token structure: {}", e)))?
+                let validation_rules = ClaimsValidationRules::new();
+                pasetors::public::verify(public_key, &untrusted_token, &validation_rules, None, None)
+                    .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?
             } else {
                 return Err(AppError::InternalServer("Public key not available for token verification".to_string()));
             }
         };
 
-        // Parse claims
-        let claims_str = String::from_utf8(trusted_token.payload().to_vec())
+        // Parse claims from payload
+        let claims_str = String::from_utf8(trusted_token.payload().as_bytes().to_vec())
             .map_err(|e| AppError::Unauthorized(format!("Invalid token payload: {}", e)))?;
         
         let claims: PasetoTokenClaims = serde_json::from_str(&claims_str)
@@ -291,8 +291,11 @@ impl PasetoSecurityService {
 
         // Get session from cache
         let session_key = format!("session:{}", claims.session_id);
-        let mut session: SecureAuthSession = self.cache.get(&session_key).await?
+        let session_json: String = self.cache.get_string(&session_key).await?
             .ok_or_else(|| AppError::Unauthorized("Session not found".to_string()))?;
+
+        let mut session: SecureAuthSession = serde_json::from_str(&session_json)
+            .map_err(|e| AppError::InternalServer(format!("Failed to deserialize session: {}", e)))?;
 
         // Check session expiration
         if session.expires_at < Utc::now() {
@@ -307,7 +310,9 @@ impl PasetoSecurityService {
 
         // Update last activity
         session.last_activity = Utc::now();
-        self.cache.set(&session_key, &session, Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
+        let updated_session_json = serde_json::to_string(&session)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize session: {}", e)))?;
+        self.cache.set_string(&session_key, updated_session_json, Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
 
         Ok(session)
     }
@@ -315,8 +320,11 @@ impl PasetoSecurityService {
     /// Create elevated session for sensitive operations
     pub async fn create_elevated_session(&self, session_id: &str, mfa_token: Option<&str>) -> AppResult<String> {
         let session_key = format!("session:{}", session_id);
-        let mut session: SecureAuthSession = self.cache.get(&session_key).await?
+        let session_json: String = self.cache.get_string(&session_key).await?
             .ok_or_else(|| AppError::Unauthorized("Session not found".to_string()))?;
+
+        let mut session: SecureAuthSession = serde_json::from_str(&session_json)
+            .map_err(|e| AppError::InternalServer(format!("Failed to deserialize session: {}", e)))?;
 
         // Verify MFA if required for elevation
         if let Some(_mfa_token) = mfa_token {
@@ -333,7 +341,9 @@ impl PasetoSecurityService {
         session.expires_at = elevated_exp;
 
         // Update session in cache with shorter TTL
-        self.cache.set(&session_key, &session, Some(Duration::from_secs(self.config.elevated_session_minutes * 60))).await?;
+        let updated_session_json = serde_json::to_string(&session)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize session: {}", e)))?;
+        self.cache.set_string(&session_key, updated_session_json, Some(Duration::from_secs(self.config.elevated_session_minutes * 60))).await?;
 
         Ok(session_id.to_string())
     }
@@ -344,8 +354,8 @@ impl PasetoSecurityService {
         
         // Add to revocation list for additional security
         let revocation_key = format!("revoked:{}", session_id);
-        self.cache.set(&revocation_key, &true, Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
-        
+        self.cache.set_string(&revocation_key, "true".to_string(), Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
+
         // Remove session
         self.cache.delete(&session_key).await?;
         
@@ -356,51 +366,5 @@ impl PasetoSecurityService {
     pub async fn is_session_revoked(&self, session_id: &str) -> AppResult<bool> {
         let revocation_key = format!("revoked:{}", session_id);
         Ok(self.cache.exists(&revocation_key).await?)
-    }
-}
-
-#[async_trait]
-impl AuthService for PasetoSecurityService {
-    async fn hash_password(&self, password: &str) -> AppResult<String> {
-        let salt = SaltString::generate(&mut OsRng);
-        let password_hash = self.argon2
-            .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| AppError::InternalServer(format!("Password hashing failed: {}", e)))?
-            .to_string();
-
-        Ok(password_hash)
-    }
-
-    async fn verify_password(&self, password: &str, hash: &str) -> AppResult<bool> {
-        let parsed_hash = PasswordHash::new(hash)
-            .map_err(|e| AppError::InternalServer(format!("Invalid password hash: {}", e)))?;
-
-        match self.argon2.verify_password(password.as_bytes(), &parsed_hash) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
-    }
-
-    async fn generate_token(&self, user: &User) -> AppResult<String> {
-        self.create_paseto_token(user, None, None, None).await
-    }
-
-    async fn validate_token(&self, token: &str) -> AppResult<UserId> {
-        let session = self.validate_paseto_token(token).await?;
-        
-        // Check if session is revoked
-        if self.is_session_revoked(&session.session_id).await? {
-            return Err(AppError::Unauthorized("Session revoked".to_string()));
-        }
-        
-        Ok(session.user_id)
-    }
-
-    async fn revoke_token(&self, token: &str) -> AppResult<()> {
-        // Extract session ID from token and revoke session
-        match self.validate_paseto_token(token).await {
-            Ok(session) => self.revoke_session(&session.session_id).await,
-            Err(_) => Ok(()), // Token already invalid, nothing to revoke
-        }
     }
 }

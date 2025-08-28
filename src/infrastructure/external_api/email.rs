@@ -38,7 +38,7 @@ impl EmailService {
             .header("Content-Type", "application/json")
             .json(&payload)
             .send()
-            .await?;
+            .await.unwrap();
 
         if response.status().is_success() {
             Ok(())

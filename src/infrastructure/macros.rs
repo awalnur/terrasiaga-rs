@@ -50,7 +50,7 @@ macro_rules! create_service {
 macro_rules! with_db_connection {
     ($pool:expr, $operation:expr) => {
         {
-            use $crate::shared::error::AppError;
+            use $crate::shared::error::{AppError, DatabaseError};
             use tokio::time::{sleep, Duration};
 
             let mut retry_count = 0;
@@ -67,29 +67,26 @@ macro_rules! with_db_connection {
                             Ok(Ok(value)) => break Ok(value),
                             Ok(Err(e)) => {
                                 if retry_count >= MAX_RETRIES {
-                                    break Err(AppError::Database {
-                                        message: format!("Database operation failed after {} retries: {}", MAX_RETRIES, e),
-                                        source: Some(Box::new(e)),
-                                    });
+                                    break Err(AppError::Database(DatabaseError::Other(
+                                        format!("Database operation failed after {} retries: {}", MAX_RETRIES, e)
+                                    )));
                                 }
                                 retry_count += 1;
                                 tracing::warn!("Database operation failed, retrying ({}/{}): {}", retry_count, MAX_RETRIES, e);
                                 sleep(Duration::from_millis(100 * retry_count as u64)).await;
                             }
                             Err(join_error) => {
-                                break Err(AppError::Database {
-                                    message: format!("Task join error: {}", join_error),
-                                    source: Some(Box::new(join_error)),
-                                });
+                                break Err(AppError::Database(DatabaseError::Other(
+                                    format!("Task join error: {}", join_error)
+                                )));
                             }
                         }
                     }
                     Err(pool_error) => {
                         if retry_count >= MAX_RETRIES {
-                            break Err(AppError::Database {
-                                message: format!("Failed to get database connection after {} retries: {}", MAX_RETRIES, pool_error),
-                                source: Some(Box::new(pool_error)),
-                            });
+                            break Err(AppError::Database(DatabaseError::Other(
+                                format!("Failed to get database connection after {} retries: {}", MAX_RETRIES, pool_error)
+                            )));
                         }
                         retry_count += 1;
                         tracing::warn!("Failed to get database connection, retrying ({}/{}): {}", retry_count, MAX_RETRIES, pool_error);
@@ -255,10 +252,11 @@ macro_rules! impl_repository_base {
             }
 
             fn get_connection(&self) -> $crate::shared::AppResult<$crate::infrastructure::database::DbConnection> {
-                self.pool.get().map_err(|e| $crate::shared::error::AppError::Database {
-                    message: format!("Failed to get database connection: {}", e),
-                    source: Some(Box::new(e)),
-                })
+                self.pool.get().map_err(|e| $crate::shared::error::AppError::Database(
+                    $crate::shared::error::DatabaseError::Other(
+                        format!("Failed to get database connection: {}", e)
+                    )
+                ))
             }
         }
     };
@@ -281,20 +279,18 @@ macro_rules! with_timeout_retry {
                 match timeout(Duration::from_secs($timeout), $operation).await {
                     Ok(Ok(result)) => break Ok(result),
                     Ok(Err(e)) if attempts >= max_attempts => {
-                        break Err(AppError::External {
-                            message: format!("Operation failed after {} attempts: {}", max_attempts, e),
-                            source: Some(Box::new(e)),
-                        });
+                        break Err(AppError::ExternalService(
+                            format!("Operation failed after {} attempts: {}", max_attempts, e)
+                        ));
                     }
                     Ok(Err(e)) => {
                         tracing::warn!("Operation failed (attempt {}/{}): {}", attempts, max_attempts, e);
                         sleep(Duration::from_millis(1000 * attempts as u64)).await;
                     }
                     Err(_timeout_err) if attempts >= max_attempts => {
-                        break Err(AppError::External {
-                            message: format!("Operation timed out after {} attempts", max_attempts),
-                            source: None,
-                        });
+                        break Err(AppError::ExternalService(
+                            format!("Operation timed out after {} attempts", max_attempts)
+                        ));
                     }
                     Err(_timeout_err) => {
                         tracing::warn!("Operation timed out (attempt {}/{})", attempts, max_attempts);
@@ -305,4 +301,3 @@ macro_rules! with_timeout_retry {
         }
     };
 }
-

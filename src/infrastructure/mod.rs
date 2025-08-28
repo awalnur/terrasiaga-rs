@@ -14,8 +14,9 @@ pub mod container;
 
 // Re-export infrastructure components
 pub use container::*;
-pub use database::{DatabaseService, DatabaseConfig};
-pub use cache::{CacheService, CacheConfig};
+pub use database::DatabaseService;
+pub use crate::config::DatabaseConfig;
+pub use cache::CacheService;
 pub use external_services::{ExternalServicesManager, ExternalServicesConfig};
 pub use monitoring::{HealthService, HealthStatus, HealthReport, ComponentHealth};
 pub use security::{PasetoSecurityService, PasetoConfig, SecurityServiceFactory};
@@ -27,3 +28,6 @@ pub type ApplicationHealth = monitoring::HealthReport;
 
 // External API integrations
 pub mod external_api;
+
+// Re-export CacheConfig from shared module
+pub use crate::infrastructure::cache::CacheConfig;

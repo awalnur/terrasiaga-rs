@@ -9,11 +9,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use terra_siaga::{
     config::AppConfig,
-    infrastructure::{AppContainer, monitoring::health::HealthMonitoringService},
+    infrastructure::AppContainer,
     presentation::api,
     middleware::{cors, errors as error_middleware},
     shared::paseto_auth::PasetoService,
 };
+use terra_siaga::infrastructure::HealthService;
+use terra_siaga::infrastructure::monitoring::{DatabaseHealthChecker, CacheHealthChecker};
+use terra_siaga::infrastructure::database::DbPool;
+use terra_siaga::middleware::ErrorHandler;
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "terra_siaga=debug,actix_web=info,actix_server=info".into()),
+                .unwrap_or_else(|_| "terra_siaga=debug,actix_web=debug,actix_server=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_ansi(true))
         .init();
@@ -42,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🖥️  Server: {}:{}", config.server.host, config.server.port);
 
     // Initialize PASETO authentication service
-    let paseto_key = config.security.paseto_key.as_bytes();
+    let paseto_key = config.auth.jwt_secret.as_bytes();
     let paseto_service = Arc::new(PasetoService::new(paseto_key).map_err(|e| {
         error!("❌ Failed to initialize PASETO service: {}", e);
         e
@@ -59,41 +63,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("📦 Application container built successfully");
 
     // Initialize health monitoring service
-    let mut health_service = HealthMonitoringService::new(
+    let mut health_service = HealthService::new(
         env!("CARGO_PKG_VERSION").to_string(),
-        config.environment().to_string(),
-        "terra-siaga".to_string(),
+        config.environment().to_string()
     );
 
     // Add health checks for critical components
-    if let Some(db_pool) = container.database_pool() {
-        health_service.add_check(Arc::new(
-            crate::infrastructure::monitoring::health::DatabaseHealthCheck::new(
-                db_pool.clone(),
-                Some("primary_database".to_string()),
+    if let Some(db_service) = container.database_pool() {
+        let db_pool_arc: Arc<DbPool> = Arc::new(db_service.pool().clone());
+        health_service.add_checker(Arc::new(
+            DatabaseHealthChecker::new(
+                "primary_database".to_string(),
+                db_pool_arc,
             )
         ));
     }
 
-    if let Some(cache_service) = container.cache_service() {
-        health_service.add_check(Arc::new(
-            crate::infrastructure::monitoring::health::CacheHealthCheck::new(
-                cache_service.clone(),
-                Some("redis_cache".to_string()),
-            )
-        ));
-    }
-
-    // Add external API health checks if configured
-    if let Some(weather_api_url) = config.external_apis.weather_api_url.as_ref() {
-        health_service.add_check(Arc::new(
-            crate::infrastructure::monitoring::health::ExternalApiHealthCheck::new(
-                format!("{}/health", weather_api_url),
-                "weather_api".to_string(),
-                Some(200),
-            )
-        ));
-    }
+    let cache_service = container.cache_service().clone();
+    health_service.add_checker(Arc::new(
+        CacheHealthChecker::new(
+            "redis_cache".to_string(),
+            cache_service,
+        )
+    ));
 
     info!("💊 Health monitoring service configured");
 
@@ -102,12 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paseto_data = web::Data::new(paseto_service);
     let health_data = web::Data::new(Arc::new(health_service));
 
-    // Extract CORS origins to avoid lifetime issues
-    let cors_origins = config.server.cors_origins.clone();
+    // Extract CORS origins to avoid lifetime issues (not required by current CORS config)
+    // let cors_origins = config.server.cors_origins.clone();
     let server_config = config.server.clone();
 
     // Initialize metrics collection
-    let metrics_exporter = metrics_exporter_prometheus::PrometheusBuilder::new()
+    let _metrics_exporter = metrics_exporter_prometheus::PrometheusBuilder::new()
         .with_http_listener(([0, 0, 0, 0], 9090))
         .build()
         .map_err(|e| {
@@ -129,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .wrap(middleware::Logger::new(
                 r#"%a "%r" %s %b "%{Referer}i" "%{User-Agent}i" %T"#
             ))
+
             .wrap(middleware::Compress::default())
             .wrap(middleware::NormalizePath::trim())
             .wrap(
@@ -136,8 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .add(("X-Version", env!("CARGO_PKG_VERSION")))
                     .add(("X-Service", "terra-siaga"))
             )
-            .wrap(cors::configure_cors(&cors_origins))
-            .wrap(error_middleware::ErrorHandler::new())
+            .wrap(cors::configure_cors())
+            .wrap(ErrorHandler::new())
 
             // Security headers
             .wrap(

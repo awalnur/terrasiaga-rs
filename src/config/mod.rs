@@ -4,10 +4,17 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use chrono::Duration;
+use env_logger::Env;
+use crate::parse_duration_seconds;
 use crate::shared::{AppResult, AppError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    pub app_name: String,
+    pub app_version: String,
+    pub app_description: String,
+    pub environment: String,
+    pub debug: String,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub auth: AuthConfig,
@@ -32,10 +39,12 @@ pub struct DatabaseConfig {
     pub url: String,
     pub max_connections: u32,
     pub min_connections: u32,
-    pub connection_timeout: u64,
-    pub idle_timeout: u64,
-    pub max_lifetime: u64,
+    pub connection_timeout: std::time::Duration,
+    pub idle_timeout: std::time::Duration,
+    pub max_lifetime: std::time::Duration,
+    pub enable_logging: bool,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -87,6 +96,13 @@ impl AppConfig {
     /// Load configuration from environment variables with defaults
     pub fn from_env() -> AppResult<Self> {
         let config = Self {
+            app_name: env::var("APP_NAME").unwrap_or_else(|_| "Terra Siaga".to_string()),
+            app_version: env::var("APP_VERSION").unwrap_or_else(|_| "1.0.1".to_string()),
+            environment: env::var("ENVIRONMENT")
+                .unwrap_or_else(|_| "development".to_string()),
+            app_description: env::var("APP_DESCRIPTION")
+                .unwrap_or_else(|_| "Disaster management platform".to_string()),
+            debug: env::var("DEBUG").unwrap_or_else(|_| "Disaster management platform".to_string()),
             server: ServerConfig {
                 host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("PORT")
@@ -123,18 +139,11 @@ impl AppConfig {
                     .unwrap_or_else(|_| "1".to_string())
                     .parse()
                     .unwrap_or(1),
-                connection_timeout: env::var("DB_CONNECTION_TIMEOUT")
-                    .unwrap_or_else(|_| "30".to_string())
-                    .parse()
-                    .unwrap_or(30),
-                idle_timeout: env::var("DB_IDLE_TIMEOUT")
-                    .unwrap_or_else(|_| "600".to_string())
-                    .parse()
-                    .unwrap_or(600),
-                max_lifetime: env::var("DB_MAX_LIFETIME")
-                    .unwrap_or_else(|_| "1800".to_string())
-                    .parse()
-                    .unwrap_or(1800),
+                connection_timeout: parse_duration_seconds("DB_CONNECTION_TIMEOUT",30),
+                idle_timeout: parse_duration_seconds("DB_IDLE_TIMEOUT", 600),
+                max_lifetime: parse_duration_seconds("DB_MAX_LIFETIME",1800),
+                enable_logging: false,
+
             },
             auth: AuthConfig {
                 jwt_secret: env::var("JWT_SECRET")

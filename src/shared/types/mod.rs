@@ -1,3 +1,5 @@
+use std::env;
+// filepath: /Users/development/RUST/terra-siaga/src/shared/types/mod.rs
 /// Shared types used across the entire application
 /// Common types, constants, and utilities following Clean Architecture principles
 
@@ -6,6 +8,15 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use std::fmt::{Display, Formatter};
 use garde::Validate;
+
+// ---------------------------------------------------------------------------
+// Submodules (new structured layout)
+// ---------------------------------------------------------------------------
+pub mod errors;
+pub mod results;
+pub mod pagination;
+pub mod dto;
+pub mod common;
 
 // ============================================================================
 // CORE DOMAIN TYPES
@@ -27,6 +38,11 @@ macro_rules! define_id {
             }
 
             pub fn as_uuid(&self) -> Uuid {
+                self.0
+            }
+
+            // Backward-compat: allow calling id.value()
+            pub fn value(&self) -> Uuid {
                 self.0
             }
         }
@@ -73,8 +89,10 @@ define_id!(SessionId);
 // USER AND AUTHENTICATION TYPES
 // ============================================================================
 
+
+// TODO update this to use the new user roles
 /// User role hierarchy with specific permissions
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord)]
 pub enum UserRole {
     /// Regular user who can report disasters and receive alerts
     Reporter,
@@ -86,12 +104,24 @@ pub enum UserRole {
     OrgAdmin,
     /// System administrator with full access
     SystemAdmin,
+    /// General admin role (alias for OrgAdmin for backwards compatibility)
+    Admin,
+
+    /// General Guest role with minimal permissions (not authenticated)
+    Citizen,
+
+    Responder,
+    SuperAdmin,
 }
 
 impl UserRole {
     /// Get default permissions for this role
     pub fn default_permissions(&self) -> Vec<Permission> {
         match self {
+            UserRole::Citizen => vec![
+                Permission::ReadReports,
+                Permission::ReadPublicData,
+            ],
             UserRole::Reporter => vec![
                 Permission::ReadReports,
                 Permission::WriteReports,
@@ -102,94 +132,74 @@ impl UserRole {
                 Permission::ReadReports,
                 Permission::WriteReports,
                 Permission::ReadAlerts,
-                Permission::WriteVolunteerResponse,
                 Permission::ReadPublicData,
-                Permission::ReadVolunteerData,
+                Permission::UpdateReports,
+                Permission::ManageVolunteerResponse,
             ],
             UserRole::Coordinator => vec![
                 Permission::ReadReports,
                 Permission::WriteReports,
                 Permission::ReadAlerts,
-                Permission::WriteAlerts,
-                Permission::ManageEmergencyResponse,
-                Permission::ManageVolunteers,
-                Permission::ReadAnalytics,
                 Permission::ReadPublicData,
-                Permission::ReadVolunteerData,
-                Permission::ReadCoordinatorData,
+                Permission::UpdateReports,
+                Permission::ManageVolunteerResponse,
+                Permission::ManageEmergencyResponse,
+                Permission::WriteArea,
             ],
-            UserRole::OrgAdmin => vec![
+            UserRole::OrgAdmin | UserRole::Admin => vec![
                 Permission::ReadReports,
                 Permission::WriteReports,
                 Permission::ReadAlerts,
-                Permission::WriteAlerts,
+                Permission::ReadPublicData,
+                Permission::UpdateReports,
+                Permission::ManageVolunteerResponse,
                 Permission::ManageEmergencyResponse,
-                Permission::ManageVolunteers,
+                Permission::WriteAlerts,
                 Permission::ManageUsers,
                 Permission::ReadAnalytics,
-                Permission::WriteAnalytics,
-                Permission::ManageOrganization,
-                Permission::ReadPublicData,
-                Permission::ReadVolunteerData,
-                Permission::ReadCoordinatorData,
-                Permission::ReadOrgData,
             ],
-            UserRole::SystemAdmin => vec![
+            UserRole::SystemAdmin => Permission::all(),
+            UserRole::Responder => vec![
                 Permission::ReadReports,
                 Permission::WriteReports,
                 Permission::ReadAlerts,
-                Permission::WriteAlerts,
-                Permission::ManageEmergencyResponse,
-                Permission::ManageVolunteers,
-                Permission::ManageUsers,
-                Permission::ReadAnalytics,
-                Permission::WriteAnalytics,
-                Permission::ManageOrganization,
-                Permission::ManageSystem,
-                Permission::ReadSystemData,
-                Permission::WriteSystemData,
                 Permission::ReadPublicData,
-                Permission::ReadVolunteerData,
-                Permission::ReadCoordinatorData,
-                Permission::ReadOrgData,
+                Permission::UpdateReports,
+                Permission::ManageVolunteerResponse,
+                Permission::ManageEmergencyResponse,
+                Permission::WriteArea,
             ],
+            UserRole::SuperAdmin => Permission::all(),
+
         }
     }
 
-    /// Check if this role has higher privileges than another
-    pub fn has_higher_privilege_than(&self, other: &UserRole) -> bool {
-        self.privilege_level() > other.privilege_level()
+
+    pub fn has_permission(&self, permission: &Permission) -> bool {
+        let default_permissions = self.default_permissions();
+        default_permissions.contains(permission)
     }
 
-    fn privilege_level(&self) -> u8 {
+    /// Check if this role has at least the given minimum role level
+    pub fn has_minimum_level(&self, min_role: &UserRole) -> bool {
+        let current_level = self.hierarchy_level();
+        let min_level = min_role.hierarchy_level();
+        current_level >= min_level
+    }
+
+
+    /// Get the hierarchy level of the role (higher number = more permissions)
+    fn hierarchy_level(&self) -> u8 {
         match self {
             UserRole::Reporter => 1,
             UserRole::Volunteer => 2,
             UserRole::Coordinator => 3,
-            UserRole::OrgAdmin => 4,
+            UserRole::OrgAdmin | UserRole::Admin => 4,
             UserRole::SystemAdmin => 5,
+            UserRole::Citizen => 6,
+            UserRole::Responder => 7,
+            UserRole::SuperAdmin => 8,
         }
-    }
-
-    /// Check if this role has a specific permission
-    pub fn has_permission(&self, permission: &Permission) -> bool {
-        self.default_permissions().contains(permission)
-    }
-
-    /// Check if this role can escalate to another role
-    pub fn can_escalate_to(&self, target_role: &UserRole) -> bool {
-        match (self, target_role) {
-            (UserRole::SystemAdmin, _) => true,
-            (UserRole::OrgAdmin, UserRole::Coordinator | UserRole::Volunteer | UserRole::Reporter) => true,
-            (UserRole::Coordinator, UserRole::Volunteer | UserRole::Reporter) => true,
-            (UserRole::Volunteer, UserRole::Reporter) => true,
-            _ => false,
-        }
-    }
-
-    /// Check if this role has permission level equal or higher than another role
-    pub fn has_permission_level(&self, other: &UserRole) -> bool {
-        self.privilege_level() >= other.privilege_level()
     }
 }
 
@@ -201,7 +211,7 @@ pub enum Permission {
     WriteReports,
     DeleteReports,
     ReadOwnReports,
-
+    UpdateReports,
     // Alert permissions
     ReadAlerts,
     WriteAlerts,
@@ -217,7 +227,7 @@ pub enum Permission {
     ManageVolunteers,
     WriteVolunteerResponse,
     ReadVolunteerData,
-
+    ManageVolunteerResponse,
     // User management permissions
     ManageUsers,
     ReadUserProfiles,
@@ -228,6 +238,9 @@ pub enum Permission {
     ReadAnalytics,
     WriteAnalytics,
     ReadAdvancedAnalytics,
+
+    // Area permissions
+    WriteArea,
 
     // Organization permissions
     ManageOrganization,
@@ -272,6 +285,7 @@ impl Permission {
             Permission::ReadReports => "reports:read",
             Permission::WriteReports => "reports:write",
             Permission::DeleteReports => "reports:delete",
+            Permission::UpdateReports => "reports:update",
             Permission::ReadOwnReports => "reports:read_own",
             Permission::ReadAlerts => "alerts:read",
             Permission::WriteAlerts => "alerts:write",
@@ -311,6 +325,8 @@ impl Permission {
             Permission::SendNotifications => "notifications:send",
             Permission::ManageNotificationTemplates => "notifications:manage_templates",
             Permission::ReadNotificationHistory => "notifications:read_history",
+            Permission::WriteArea => "area:write",
+            Permission::ManageVolunteerResponse => "volunteer:manage",
         }
     }
 
@@ -361,6 +377,54 @@ impl Permission {
             "notifications:read_history" => Some(Permission::ReadNotificationHistory),
             _ => None,
         }
+    }
+
+    /// Get all available permissions
+    pub fn all() -> Vec<Self> {
+        vec![
+            Permission::ReadReports,
+            Permission::WriteReports,
+            Permission::DeleteReports,
+            Permission::ReadOwnReports,
+            Permission::ReadAlerts,
+            Permission::WriteAlerts,
+            Permission::DeleteAlerts,
+            Permission::ManageAlerts,
+            Permission::ManageEmergencyResponse,
+            Permission::UpdateEmergencyStatus,
+            Permission::AssignEmergencyResponse,
+            Permission::ManageVolunteers,
+            Permission::WriteVolunteerResponse,
+            Permission::ReadVolunteerData,
+            Permission::ManageUsers,
+            Permission::ReadUserProfiles,
+            Permission::UpdateUserProfiles,
+            Permission::DeleteUsers,
+            Permission::ReadAnalytics,
+            Permission::WriteAnalytics,
+            Permission::ReadAdvancedAnalytics,
+            Permission::ManageOrganization,
+            Permission::ReadOrgData,
+            Permission::WriteOrgData,
+            Permission::ManageSystem,
+            Permission::ReadSystemData,
+            Permission::WriteSystemData,
+            Permission::ManageSystemConfig,
+            Permission::ReadPublicData,
+            Permission::ReadCoordinatorData,
+            Permission::ReadOwnProfile,
+            Permission::UpdateOwnProfile,
+            Permission::ReadAllProfiles,
+            Permission::ManageLocations,
+            Permission::ReadLocationData,
+            Permission::UpdateLocationData,
+            Permission::ManageResources,
+            Permission::ReadResourceData,
+            Permission::UpdateResourceData,
+            Permission::SendNotifications,
+            Permission::ManageNotificationTemplates,
+            Permission::ReadNotificationHistory,
+        ]
     }
 }
 
@@ -590,6 +654,9 @@ pub enum DisasterType {
     Other(String),
 }
 
+
+
+
 impl Display for DisasterType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -607,6 +674,8 @@ impl Display for DisasterType {
         }
     }
 }
+
+
 
 /// Severity levels for disasters
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -648,6 +717,25 @@ impl Display for EmergencyStatus {
             EmergencyStatus::Responding => write!(f, "Responding"),
             EmergencyStatus::Resolved => write!(f, "Resolved"),
             EmergencyStatus::Closed => write!(f, "Closed"),
+        }
+    }
+}
+
+impl DisasterType {
+    /// Baseline expected severity for each disaster type
+    pub fn default_severity(&self) -> SeverityLevel {
+        match self {
+            DisasterType::Earthquake => SeverityLevel::High,
+            DisasterType::Flood => SeverityLevel::High,
+            DisasterType::Fire => SeverityLevel::High,
+            DisasterType::Landslide => SeverityLevel::High,
+            DisasterType::Tsunami => SeverityLevel::Critical,
+            DisasterType::Volcano => SeverityLevel::High,
+            DisasterType::Storm => SeverityLevel::Medium,
+            DisasterType::Drought => SeverityLevel::Medium,
+            DisasterType::Epidemic => SeverityLevel::High,
+            DisasterType::TechnologicalDisaster => SeverityLevel::High,
+            DisasterType::Other(_) => SeverityLevel::Medium,
         }
     }
 }
@@ -806,4 +894,13 @@ pub mod constants {
     pub const DEFAULT_CACHE_TTL_SECONDS: u64 = 3600; // 1 hour
     pub const SHORT_CACHE_TTL_SECONDS: u64 = 300;    // 5 minutes
     pub const LONG_CACHE_TTL_SECONDS: u64 = 86400;   // 24 hours
+}
+
+pub fn parse_duration_seconds(key: &str, default: u64) -> std::time::Duration {
+    Duration::from_secs(
+        env::var(key)
+            .unwrap_or_else(|_| default.to_string())
+            .parse::<u64>()
+            .unwrap_or(default)
+    )
 }

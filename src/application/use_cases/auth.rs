@@ -6,8 +6,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use crate::shared::{AppResult, UserId};
 use crate::application::use_cases::{UseCase, ValidatedUseCase};
+use crate::domain::{Email, User, Username};
 use crate::domain::ports::repositories::UserRepository;
 use crate::domain::ports::services::AuthService;
+use crate::shared::UserRole;
 
 // DTOs for authentication use cases
 #[derive(Debug, serde::Deserialize, validator::Validate)]
@@ -60,8 +62,9 @@ impl LoginUseCase {
 impl UseCase<LoginRequest, LoginResponse> for LoginUseCase {
     async fn execute(&self, request: LoginRequest) -> AppResult<LoginResponse> {
         // Find user by email
+        let email = Email::new(request.email.clone())?;
         let user = self.user_repository
-            .find_by_email(&request.email)
+            .find_by_email(&email)
             .await?
             .ok_or_else(|| crate::shared::AppError::Authentication("Invalid credentials".to_string()))?;
 
@@ -112,12 +115,13 @@ impl RegisterUseCase {
 #[async_trait]
 impl ValidatedUseCase<RegisterRequest, LoginResponse> for RegisterUseCase {
     async fn validate(&self, request: &RegisterRequest) -> AppResult<()> {
+        let email = Email::new(request.email.clone())?;
         use validator::Validate;
         request.validate()
             .map_err(|e| crate::shared::AppError::Validation(format!("Validation failed: {:?}", e)))?;
 
         // Check if email already exists
-        if self.user_repository.find_by_email(&request.email).await?.is_some() {
+        if self.user_repository.find_by_email(&email).await?.is_some() {
             return Err(crate::shared::AppError::Conflict("Email already exists".to_string()));
         }
 
@@ -137,14 +141,16 @@ impl UseCase<RegisterRequest, LoginResponse> for RegisterUseCase {
         let password_hash = self.auth_service.hash_password(&request.password).await?;
 
         // Create user using value objects
-        let email = crate::domain::value_objects::Email::new(request.email)?;
-        let username = crate::domain::value_objects::Username::new(request.username)?;
+        let email = Email::new(request.email)?;
+        let username =Username::new(request.username)?;
+        let role = UserRole::Volunteer;
 
-        let user = crate::domain::entities::User::new(
+        let user = User::new(
             email,
             username,
             request.full_name,
             password_hash,
+            role,
         )?;
 
         // Save user

@@ -14,6 +14,8 @@ use crate::infrastructure::database::DbPool;
 use std::time::Instant;
 use futures;
 use diesel;
+use diesel::RunQueryDsl;
+use futures_util::task::Spawn;
 
 /// Overall system health status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,17 +120,17 @@ impl HealthChecker for DatabaseHealthChecker {
         let start = SystemTime::now();
         let mut details = HashMap::new();
 
-        let (status, message) = match self.pool.get().await {
+        let (status, message) = match self.pool.get() {
             Ok(mut conn) => {
                 // Try a simple query
                 match diesel::sql_query("SELECT 1").execute(&mut *conn) {
                     Ok(_) => {
-                        let pool_status = self.pool.status();
-                        details.insert("pool_size".to_string(), serde_json::json!(pool_status.size));
-                        details.insert("available_connections".to_string(), serde_json::json!(pool_status.available));
-                        
-                        if pool_status.available == 0 {
-                            (HealthStatus::Degraded, Some("Database pool exhausted".to_string()))
+                        let pool_state = self.pool.state();
+                        details.insert("connections".to_string(), serde_json::json!(pool_state.connections));
+                        details.insert("idle_connections".to_string(), serde_json::json!(pool_state.idle_connections));
+
+                        if pool_state.idle_connections == 0 {
+                            (HealthStatus::Degraded, Some("Database pool has no idle connections".to_string()))
                         } else {
                             (HealthStatus::Healthy, Some("Database connection successful".to_string()))
                         }
@@ -180,9 +182,9 @@ impl HealthChecker for CacheHealthChecker {
         let test_key = "health_check_test";
         let test_value = "ok";
 
-        let (status, message) = match self.cache_service.set(test_key, &test_value, Some(Duration::from_secs(60))).await {
+        let (status, message) = match self.cache_service.set_string(test_key, test_value.to_string(), Some(Duration::from_secs(60))).await {
             Ok(_) => {
-                match self.cache_service.get::<String>(test_key).await {
+                match self.cache_service.get_string(test_key).await {
                     Ok(Some(value)) if value == test_value => {
                         // Cleanup
                         let _ = self.cache_service.delete(test_key).await;
@@ -212,7 +214,7 @@ impl HealthChecker for CacheHealthChecker {
             status,
             message,
             details,
-            last_checked: chrono::Utc::now(),
+            last_checked: Utc::now(),
             response_time_ms: start.elapsed().unwrap_or(Duration::from_secs(0)).as_millis() as u64,
         }
     }
@@ -401,7 +403,7 @@ impl HealthService {
         for component_health in results {
             report.add_component(component_health);
         }
-
+        println!("Health report: {:?}", report);
         report
     }
 
@@ -418,6 +420,16 @@ impl HealthService {
         if report.is_operational() {
             Ok(())
         } else {
+
+            // Log which components are failing
+            let failing_components: Vec<_> = report.components
+                .iter()
+                .filter(|(_, c)| !matches!(c.status, HealthStatus::Healthy))
+                .map(|(name, c)| format!("{}: {:?} - {}", name, c.status, c.message.as_deref().unwrap_or("")))
+                .collect();
+
+            error!("System not ready: {:?}. Failing components: {}",
+               report.overall_status, failing_components.join(", "));
             Err(AppError::ServiceUnavailable(
                 format!("System not ready: {:?}", report.overall_status)
             ))

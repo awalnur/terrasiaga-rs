@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::application::use_cases::{UseCase, ValidatedUseCase};
-use crate::domain::entities::Disaster;
+use crate::domain::entities::disaster::{Disaster, DisasterSeverity, DisasterStatus, DisasterType};
 use crate::domain::value_objects::*;
 use crate::domain::ports::repositories::DisasterRepository;
 use crate::domain::ports::services::NotificationService;
@@ -17,11 +17,11 @@ use crate::shared::{AppResult, AppError};
 /// Request to report a new disaster
 #[derive(Debug, Clone)]
 pub struct ReportDisasterRequest {
+    pub title: String,
+    pub description: String,
     pub disaster_type: String,
     pub severity: DisasterSeverity,
     pub location: Coordinates,
-    pub address: Address,
-    pub description: String,
     pub reported_by: UserId,
     pub contact_info: Option<PhoneNumber>,
     pub images: Vec<String>, // URLs or base64 encoded images
@@ -31,11 +31,11 @@ pub struct ReportDisasterRequest {
 #[derive(Debug, Clone)]
 pub struct DisasterResponse {
     pub id: DisasterId,
+    pub title: String,
     pub disaster_type: String,
     pub severity: DisasterSeverity,
     pub status: String,
     pub location: Coordinates,
-    pub address: Address,
     pub description: String,
     pub reported_by: UserId,
     pub reported_at: DateTime<Utc>,
@@ -70,6 +70,10 @@ impl ValidatedUseCase<ReportDisasterRequest, DisasterResponse> for ReportDisaste
             return Err(AppError::Validation("Disaster type cannot be empty".to_string()));
         }
 
+        if request.title.trim().is_empty() {
+            return Err(AppError::Validation("Title cannot be empty".to_string()));
+        }
+
         if request.description.trim().is_empty() {
             return Err(AppError::Validation("Description cannot be empty".to_string()));
         }
@@ -85,20 +89,30 @@ impl ValidatedUseCase<ReportDisasterRequest, DisasterResponse> for ReportDisaste
 #[async_trait]
 impl UseCase<ReportDisasterRequest, DisasterResponse> for ReportDisasterUseCase {
     async fn execute(&self, request: ReportDisasterRequest) -> AppResult<DisasterResponse> {
-        // Create disaster entity
-        let disaster_id = DisasterId::new();
-        let now = Utc::now();
+        // Map type string to enum
+        let dtype = match request.disaster_type.to_lowercase().as_str() {
+            "earthquake" => DisasterType::Earthquake,
+            "flood" => DisasterType::Flood,
+            "tsunami" => DisasterType::Tsunami,
+            "landslide" => DisasterType::Landslide,
+            "volcanic_eruption" | "volcaniceruption" | "volcano" => DisasterType::VolcanicEruption,
+            "fire" => DisasterType::Fire,
+            "storm" => DisasterType::Storm,
+            "drought" => DisasterType::Drought,
+            "epidemic" => DisasterType::Epidemic,
+            "technological" | "technological_disaster" => DisasterType::TechnologicalDisaster,
+            other => DisasterType::Other(other.to_string()),
+        };
 
+        // Create disaster entity
         let disaster = Disaster::new(
-            disaster_id.clone(),
-            request.disaster_type.clone(),
+            request.title.clone(),
+            request.description.clone(),
+            dtype,
             request.severity.clone(),
             request.location.clone(),
-            request.address.clone(),
-            request.description.clone(),
             request.reported_by.clone(),
-            now,
-        )?;
+        );
 
         // Save to repository
         let saved_disaster = self.disaster_repository.save(&disaster).await?;
@@ -106,35 +120,31 @@ impl UseCase<ReportDisasterRequest, DisasterResponse> for ReportDisasterUseCase 
         // Publish domain event
         let event = DisasterReportedEvent {
             event_id: Uuid::new_v4(),
-            disaster_id: disaster_id.clone(),
+            disaster_id: saved_disaster.id().clone(),
             reported_by: request.reported_by.clone(),
             disaster_type: request.disaster_type.clone(),
             severity: request.severity.clone(),
             location: request.location.clone(),
             description: request.description.clone(),
-            occurred_at: now,
-            version: 1,
+            occurred_at: saved_disaster.created_at(),
+            version: saved_disaster.version() as u64,
         };
 
         self.event_publisher.publish(&event).await?;
 
-        // Trigger emergency notifications if severity is high or critical
-        if matches!(request.severity, DisasterSeverity::High | DisasterSeverity::Critical) {
-            self.notification_service
-                .send_emergency_alert(&disaster, 5.0) // 5km radius
-                .await?;
-        }
+        // Optional notification: notify about new disaster (use existing method)
+        let _ = self.notification_service.notify_disaster_update(&saved_disaster).await;
 
         Ok(DisasterResponse {
-            id: saved_disaster.id(),
-            disaster_type: saved_disaster.disaster_type().to_string(),
+            id: saved_disaster.id().clone(),
+            title: saved_disaster.title().to_string(),
+            disaster_type: format!("{:?}", saved_disaster.disaster_type()),
             severity: saved_disaster.severity().clone(),
-            status: saved_disaster.status().to_string(),
+            status: format!("{:?}", saved_disaster.status()),
             location: saved_disaster.location().clone(),
-            address: saved_disaster.address().clone(),
             description: saved_disaster.description().to_string(),
-            reported_by: saved_disaster.reported_by().clone(),
-            reported_at: saved_disaster.reported_at(),
+            reported_by: saved_disaster.reporter_id().clone(),
+            reported_at: saved_disaster.created_at(),
             updated_at: saved_disaster.updated_at(),
         })
     }
@@ -170,9 +180,9 @@ impl UpdateDisasterStatusUseCase {
 #[async_trait]
 impl ValidatedUseCase<UpdateDisasterStatusRequest, DisasterResponse> for UpdateDisasterStatusUseCase {
     async fn validate(&self, request: &UpdateDisasterStatusRequest) -> AppResult<()> {
-        let valid_statuses = ["reported", "verified", "responding", "resolved", "closed"];
+        let valid_statuses = ["reported", "verified", "responded", "resolved", "closed"];
         
-        if !valid_statuses.contains(&request.new_status.as_str()) {
+        if !valid_statuses.contains(&request.new_status.to_lowercase().as_str()) {
             return Err(AppError::Validation(format!(
                 "Invalid status. Must be one of: {}",
                 valid_statuses.join(", ")
@@ -192,13 +202,23 @@ impl UseCase<UpdateDisasterStatusRequest, DisasterResponse> for UpdateDisasterSt
             .await?
             .ok_or_else(|| AppError::NotFound("Disaster not found".to_string()))?;
 
-        let old_status = disaster.status().to_string();
+        let old_status = format!("{:?}", disaster.status());
+
+        // Parse new status
+        let new_status_enum = match request.new_status.to_lowercase().as_str() {
+            "reported" => DisasterStatus::Reported,
+            "verified" => DisasterStatus::Verified,
+            "responded" | "responding" => DisasterStatus::Responded,
+            "resolved" => DisasterStatus::Resolved,
+            "closed" => DisasterStatus::Closed,
+            _ => return Err(AppError::Validation("Invalid status".to_string())),
+        };
 
         // Update status
-        disaster.update_status(&request.new_status, request.updated_by.clone())?;
+        disaster.update_status(new_status_enum, request.updated_by.clone())?;
 
         // Save updated disaster
-        let saved_disaster = self.disaster_repository.save(&disaster).await?;
+        let saved_disaster = self.disaster_repository.update(&disaster).await?;
 
         // Publish domain event
         let event = DisasterStatusUpdatedEvent {
@@ -206,23 +226,23 @@ impl UseCase<UpdateDisasterStatusRequest, DisasterResponse> for UpdateDisasterSt
             disaster_id: request.disaster_id.clone(),
             updated_by: request.updated_by.clone(),
             old_status,
-            new_status: request.new_status.clone(),
+            new_status: format!("{:?}", saved_disaster.status()),
             occurred_at: Utc::now(),
-            version: saved_disaster.version(),
+            version: saved_disaster.version() as u64,
         };
 
         self.event_publisher.publish(&event).await?;
 
         Ok(DisasterResponse {
-            id: saved_disaster.id(),
-            disaster_type: saved_disaster.disaster_type().to_string(),
+            id: saved_disaster.id().clone(),
+            title: saved_disaster.title().to_string(),
+            disaster_type: format!("{:?}", saved_disaster.disaster_type()),
             severity: saved_disaster.severity().clone(),
-            status: saved_disaster.status().to_string(),
+            status: format!("{:?}", saved_disaster.status()),
             location: saved_disaster.location().clone(),
-            address: saved_disaster.address().clone(),
             description: saved_disaster.description().to_string(),
-            reported_by: saved_disaster.reported_by().clone(),
-            reported_at: saved_disaster.reported_at(),
+            reported_by: saved_disaster.reporter_id().clone(),
+            reported_at: saved_disaster.created_at(),
             updated_at: saved_disaster.updated_at(),
         })
     }
@@ -275,26 +295,40 @@ impl UseCase<GetNearbyDisastersRequest, Vec<DisasterResponse>> for GetNearbyDisa
     async fn execute(&self, request: GetNearbyDisastersRequest) -> AppResult<Vec<DisasterResponse>> {
         let disasters = self.disaster_repository
             .find_nearby(
-                &request.location,
+                request.location.latitude,
+                request.location.longitude,
                 request.radius_km,
-                request.status_filter,
-                request.severity_filter,
-                request.limit,
             )
             .await?;
 
-        let responses = disasters
+        // Apply optional filters in application layer
+        let mut filtered: Vec<Disaster> = disasters.into_iter().filter(|d| {
+            let status_ok = if let Some(ref statuses) = request.status_filter {
+                let s = format!("{:?}", d.status()).to_lowercase();
+                statuses.iter().any(|x| x.to_lowercase() == s)
+            } else { true };
+
+            let severity_ok = if let Some(ref severities) = request.severity_filter {
+                severities.contains(d.severity())
+            } else { true };
+
+            status_ok && severity_ok
+        }).collect();
+
+        if let Some(limit) = request.limit { filtered.truncate(limit as usize); }
+
+        let responses = filtered
             .into_iter()
             .map(|disaster| DisasterResponse {
-                id: disaster.id(),
-                disaster_type: disaster.disaster_type().to_string(),
+                id: disaster.id().clone(),
+                title: disaster.title().to_string(),
+                disaster_type: format!("{:?}", disaster.disaster_type()),
                 severity: disaster.severity().clone(),
-                status: disaster.status().to_string(),
+                status: format!("{:?}", disaster.status()),
                 location: disaster.location().clone(),
-                address: disaster.address().clone(),
                 description: disaster.description().to_string(),
-                reported_by: disaster.reported_by().clone(),
-                reported_at: disaster.reported_at(),
+                reported_by: disaster.reporter_id().clone(),
+                reported_at: disaster.created_at(),
                 updated_at: disaster.updated_at(),
             })
             .collect();

@@ -3,6 +3,7 @@
 
 pub mod v1;
 pub mod health;
+pub mod auth;
 
 use actix_web::web;
 

@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, warn};
-
+use crate::domain::Disaster;
+use crate::domain::ports::EmergencyResponse;
 use crate::shared::{AppResult, AppError};
 use crate::domain::ports::services::NotificationService;
+use crate::UserId;
 use super::{SmsConfig, EmailConfig, WhatsAppConfig};
 
 /// External notification service implementation
@@ -79,5 +81,21 @@ impl NotificationService for ExternalNotificationService {
         
         info!("Push notification sent successfully to user: {}", user_id);
         Ok(())
+    }
+
+    async fn notify_emergency_dispatch(&self, disaster: &Disaster, response: &EmergencyResponse) -> AppResult<()> {
+        todo!()
+    }
+
+    async fn notify_disaster_update(&self, disaster: &Disaster) -> AppResult<()> {
+        todo!()
+    }
+
+    async fn notify_volunteers(&self, disaster: &Disaster, volunteers: &[UserId]) -> AppResult<()> {
+        todo!()
+    }
+
+    async fn send_emergency_alert(&self, message: &str, recipients: &[UserId]) -> AppResult<()> {
+        todo!()
     }
 }

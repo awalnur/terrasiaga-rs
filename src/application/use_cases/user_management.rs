@@ -13,6 +13,7 @@ use crate::domain::ports::repositories::UserRepository;
 use crate::domain::ports::services::{AuthService, NotificationService};
 use crate::domain::events::{UserRegisteredEvent, UserActivatedEvent, EventPublisher};
 use crate::shared::{AppResult, AppError};
+use crate::shared::types::Permission;
 
 /// Request to register a new user
 #[derive(Debug, Clone)]
@@ -35,7 +36,7 @@ pub struct UserResponse {
     pub phone_number: Option<PhoneNumber>,
     pub role: UserRole,
     pub status: String,
-    pub address: Option<Address>,
+    pub address: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_login: Option<DateTime<Utc>>,
 }
@@ -116,23 +117,41 @@ impl UseCase<RegisterUserRequest, UserResponse> for RegisterUserUseCase {
             None
         };
 
+        // Derive a username from email local-part (fallback to full_name slug)
+        let username = {
+            let local = email.value().split('@').next().unwrap_or("");
+            let candidate = if !local.is_empty() { local.to_string() } else { request.full_name.replace(' ', ".") };
+            Username::new(candidate)?
+        };
+
         // Hash password
         let password_hash = self.auth_service.hash_password(&request.password).await?;
 
         // Create user entity
-        let user_id = UserId::new();
-        let now = Utc::now();
-
-        let user = User::new(
-            user_id.clone(),
+        let mut user = User::new(
             email.clone(),
-            password_hash,
+            username,
             request.full_name.clone(),
-            phone_number.clone(),
+            password_hash,
             request.role.clone(),
-            request.address.clone(),
-            now,
         )?;
+
+        // Optional fields
+        user.phone_number = phone_number;
+        if let Some(addr) = request.address.clone() {
+            let line = format!(
+                "{}, {}, {}, {}{}",
+                addr.street,
+                addr.city,
+                addr.province,
+                addr.country.unwrap_or_else(|| "".to_string()),
+                addr.postal_code.map(|p| format!("-{}", p)).unwrap_or_default()
+            ).trim().to_string();
+            user.address = if line.trim_matches([',', ' ']).is_empty() { None } else { Some(line) };
+        }
+        if let Some(ec) = request.emergency_contact.clone() {
+            user.profile.emergency_contact = Some(ec);
+        }
 
         // Save user
         let saved_user = self.user_repository.save(&user).await?;
@@ -140,30 +159,29 @@ impl UseCase<RegisterUserRequest, UserResponse> for RegisterUserUseCase {
         // Publish domain event
         let event = UserRegisteredEvent {
             event_id: Uuid::new_v4(),
-            user_id: user_id.clone(),
-            email: email.clone(),
-            role: request.role.clone(),
-            occurred_at: now,
-            version: 1,
+            user_id: *saved_user.id(),
+            email: saved_user.email().clone(),
+            role: saved_user.role().clone(),
+            occurred_at: Utc::now(),
+            version: saved_user.version as u64,
         };
-
         self.event_publisher.publish(&event).await?;
 
-        // Send welcome notification
-        self.notification_service
-            .send_welcome_notification(&saved_user)
-            .await?;
+        // Send welcome email notification
+        let _ = self.notification_service
+            .send_email(saved_user.email().value(), "Welcome to Terra Siaga", "Your account has been created successfully.")
+            .await;
 
         Ok(UserResponse {
-            id: saved_user.id(),
+            id: *saved_user.id(),
             email: saved_user.email().clone(),
             full_name: saved_user.full_name().to_string(),
-            phone_number: saved_user.phone_number().clone(),
+            phone_number: saved_user.phone_number().cloned(),
             role: saved_user.role().clone(),
             status: saved_user.status().to_string(),
-            address: saved_user.address().clone(),
-            created_at: saved_user.created_at(),
-            last_login: saved_user.last_login(),
+            address: saved_user.address.clone(),
+            created_at: saved_user.created_at,
+            last_login: saved_user.last_login,
         })
     }
 }
@@ -231,35 +249,48 @@ impl UseCase<UpdateUserProfileRequest, UserResponse> for UpdateUserProfileUseCas
 
         // Update fields if provided
         if let Some(full_name) = request.full_name {
-            user.update_full_name(full_name)?;
+            let name = full_name.trim().to_string();
+            if name.is_empty() { return Err(AppError::Validation("Full name cannot be empty".to_string())); }
+            user.full_name = name;
         }
 
         if let Some(phone) = request.phone_number {
-            let phone_number = if phone.is_empty() {
-                None
-            } else {
-                Some(PhoneNumber::new(phone)?)
-            };
-            user.update_phone_number(phone_number)?;
+            user.phone_number = if phone.is_empty() { None } else { Some(PhoneNumber::new(phone)?) };
         }
 
         if let Some(address) = request.address {
-            user.update_address(Some(address))?;
+            let line = format!(
+                "{}, {}, {}, {}{}",
+                address.street,
+                address.city,
+                address.province,
+                address.country.unwrap_or_else(|| "".to_string()),
+                address.postal_code.map(|p| format!("-{}", p)).unwrap_or_default()
+            ).trim().to_string();
+            user.address = if line.trim_matches([',', ' ']).is_empty() { None } else { Some(line) };
         }
 
+        if let Some(ec) = request.emergency_contact {
+            user.profile.emergency_contact = if ec.trim().is_empty() { None } else { Some(ec) };
+        }
+
+        // Update audit fields
+        user.updated_at = Utc::now();
+        user.version += 1;
+
         // Save updated user
-        let saved_user = self.user_repository.save(&user).await?;
+        let saved_user = self.user_repository.update(&user).await?;
 
         Ok(UserResponse {
-            id: saved_user.id(),
+            id: *saved_user.id(),
             email: saved_user.email().clone(),
             full_name: saved_user.full_name().to_string(),
-            phone_number: saved_user.phone_number().clone(),
+            phone_number: saved_user.phone_number().cloned(),
             role: saved_user.role().clone(),
             status: saved_user.status().to_string(),
-            address: saved_user.address().clone(),
-            created_at: saved_user.created_at(),
-            last_login: saved_user.last_login(),
+            address: saved_user.address.clone(),
+            created_at: saved_user.created_at,
+            last_login: saved_user.last_login,
         })
     }
 }
@@ -295,7 +326,6 @@ impl ChangeUserStatusUseCase {
 impl ValidatedUseCase<ChangeUserStatusRequest, UserResponse> for ChangeUserStatusUseCase {
     async fn validate(&self, request: &ChangeUserStatusRequest) -> AppResult<()> {
         let valid_statuses = ["active", "inactive", "suspended", "banned"];
-        
         if !valid_statuses.contains(&request.new_status.as_str()) {
             return Err(AppError::Validation(format!(
                 "Invalid status. Must be one of: {}",
@@ -315,7 +345,7 @@ impl ValidatedUseCase<ChangeUserStatusRequest, UserResponse> for ChangeUserStatu
             .await?
             .ok_or_else(|| AppError::NotFound("Requester not found".to_string()))?;
 
-        if !requester.role().can_perform("manage_users") {
+        if !requester.role().has_permission(&Permission::ManageUsers) {
             return Err(AppError::Forbidden("Insufficient permissions to change user status".to_string()));
         }
 
@@ -333,29 +363,43 @@ impl UseCase<ChangeUserStatusRequest, UserResponse> for ChangeUserStatusUseCase 
             .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
         // Update status
-        user.change_status(&request.new_status)?;
+        match request.new_status.as_str() {
+            "active" => { user.activate()?; }
+            "inactive" => {
+                user.status = UserStatus::Inactive;
+                user.updated_at = Utc::now();
+                user.version += 1;
+            }
+            "suspended" => { user.suspend(request.reason.clone())?; }
+            "banned" => {
+                user.status = UserStatus::Banned;
+                user.updated_at = Utc::now();
+                user.version += 1;
+            }
+            _ => {}
+        }
 
         // Save updated user
-        let saved_user = self.user_repository.save(&user).await?;
+        let saved_user = self.user_repository.update(&user).await?;
 
         // Publish appropriate domain event
         match request.new_status.as_str() {
             "active" => {
                 let event = UserActivatedEvent {
                     event_id: Uuid::new_v4(),
-                    user_id: request.user_id.clone(),
+                    user_id: request.user_id,
                     occurred_at: Utc::now(),
-                    version: saved_user.version(),
+                    version: saved_user.version as u64,
                 };
                 self.event_publisher.publish(&event).await?;
             }
             "inactive" | "suspended" | "banned" => {
                 let event = crate::domain::events::UserDeactivatedEvent {
                     event_id: Uuid::new_v4(),
-                    user_id: request.user_id.clone(),
+                    user_id: request.user_id,
                     reason: request.reason.unwrap_or_else(|| format!("Status changed to {}", request.new_status)),
                     occurred_at: Utc::now(),
-                    version: saved_user.version(),
+                    version: saved_user.version as u64,
                 };
                 self.event_publisher.publish(&event).await?;
             }
@@ -363,15 +407,15 @@ impl UseCase<ChangeUserStatusRequest, UserResponse> for ChangeUserStatusUseCase 
         }
 
         Ok(UserResponse {
-            id: saved_user.id(),
+            id: *saved_user.id(),
             email: saved_user.email().clone(),
             full_name: saved_user.full_name().to_string(),
-            phone_number: saved_user.phone_number().clone(),
+            phone_number: saved_user.phone_number().cloned(),
             role: saved_user.role().clone(),
             status: saved_user.status().to_string(),
-            address: saved_user.address().clone(),
-            created_at: saved_user.created_at(),
-            last_login: saved_user.last_login(),
+            address: saved_user.address.clone(),
+            created_at: saved_user.created_at,
+            last_login: saved_user.last_login,
         })
     }
 }

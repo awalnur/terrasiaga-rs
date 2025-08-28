@@ -3,7 +3,6 @@
 
 use async_trait::async_trait;
 use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -13,151 +12,121 @@ use crate::domain::ports::repositories::UserRepository;
 use crate::infrastructure::cache::{CacheService, CacheKeys};
 use crate::shared::{AppResult, AppError};
 use std::time::Duration;
+use crate::infrastructure::database::DbPool;
+use chrono::Utc;
+use crate::infrastructure::database::schemas::users;
+use crate::shared::error::DatabaseError;
 
 /// Database model for users
 #[derive(Queryable, Insertable, AsChangeset, Debug)]
 #[diesel(table_name = users)]
 pub struct UserModel {
     pub id: Uuid,
-    pub email: String,
+    pub username: String,
     pub password_hash: String,
-    pub full_name: String,
-    pub phone_number: Option<String>,
-    pub role: String,
-    pub status: String,
-    pub address_street: Option<String>,
-    pub address_city: Option<String>,
-    pub address_province: Option<String>,
-    pub address_postal_code: Option<String>,
-    pub address_country: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub last_login: Option<chrono::DateTime<chrono::Utc>>,
-    pub version: i64,
-}
-
-table! {
-    users (id) {
-        id -> Uuid,
-        email -> Varchar,
-        password_hash -> Varchar,
-        full_name -> Varchar,
-        phone_number -> Nullable<Varchar>,
-        role -> Varchar,
-        status -> Varchar,
-        address_street -> Nullable<Varchar>,
-        address_city -> Nullable<Varchar>,
-        address_province -> Nullable<Varchar>,
-        address_postal_code -> Nullable<Varchar>,
-        address_country -> Nullable<Varchar>,
-        created_at -> Timestamptz,
-        updated_at -> Timestamptz,
-        last_login -> Nullable<Timestamptz>,
-        version -> BigInt,
-    }
+    pub email: String,
+    pub phone: Option<String>,
+    pub role_id: Option<i32>,
+    pub full_name: Option<String>,
+    pub address: Option<String>,
+    pub profile_photo_url: Option<String>,
+    pub bio: Option<String>,
+    pub date_of_birth: Option<chrono::NaiveDate>,
+    pub gender: Option<String>,
+    pub is_verified: Option<bool>,
+    pub is_active: Option<bool>,
+    pub last_login: Option<chrono::NaiveDateTime>,
+    pub created_at: Option<chrono::NaiveDateTime>,
+    pub updated_at: Option<chrono::NaiveDateTime>,
 }
 
 impl UserModel {
     /// Convert database model to domain entity
     pub fn to_domain(&self) -> AppResult<User> {
         let email = Email::new(self.email.clone())?;
-        
-        let phone_number = match &self.phone_number {
+        let username = Username::new(self.username.clone())?;
+        let phone_number = match &self.phone {
             Some(phone) => Some(PhoneNumber::new(phone.clone())?),
             None => None,
         };
 
-        let role = match self.role.as_str() {
-            "citizen" => UserRole::Citizen,
-            "volunteer" => UserRole::Volunteer,
-            "responder" => UserRole::Responder,
-            "admin" => UserRole::Admin,
-            "super_admin" => UserRole::SuperAdmin,
-            _ => return Err(AppError::Internal(format!("Invalid user role: {}", self.role))),
+        // Basic role mapping fallback (improve by joining roles table if needed)
+        let role = UserRole::Citizen;
+
+        // Derive status from is_active/is_verified
+        let status = match (self.is_active.unwrap_or(true), self.is_verified.unwrap_or(false)) {
+            (true, true) => UserStatus::Active,
+            (true, false) => UserStatus::Pending,
+            (false, _) => UserStatus::Inactive,
         };
 
-        let address = if let (Some(street), Some(city), Some(province)) = 
-            (&self.address_street, &self.address_city, &self.address_province) {
-            Some(Address::new(
-                street.clone(),
-                city.clone(),
-                province.clone(),
-                self.address_postal_code.clone(),
-                self.address_country.clone(),
-            )?)
-        } else {
-            None
-        };
+        let now = Utc::now();
+        let created_at = self.created_at.map(|t| chrono::DateTime::<Utc>::from_utc(t, Utc)).unwrap_or(now);
+        let updated_at = self.updated_at.map(|t| chrono::DateTime::<Utc>::from_utc(t, Utc)).unwrap_or(now);
+        let last_login = self.last_login.map(|t| chrono::DateTime::<Utc>::from_utc(t, Utc));
 
-        let user = User::from_persistence(
-            UserId::from_uuid(self.id),
+        let mut user = User::new(
             email,
+            username,
+            self.full_name.clone().unwrap_or_default(),
             self.password_hash.clone(),
-            self.full_name.clone(),
-            phone_number,
             role,
-            self.status.clone(),
-            address,
-            self.created_at,
-            self.updated_at,
-            self.last_login,
-            self.version as u64,
         )?;
+        user.id = UserId::from_uuid(self.id);
+        user.phone_number = phone_number;
+        user.status = status;
+        user.address = self.address.clone();
+        user.created_at = created_at;
+        user.updated_at = updated_at;
+        user.last_login = last_login;
+        user.version = 1;
+
+        // Set profile fields
+        user.profile.bio = self.bio.clone();
+        user.profile.avatar_url = self.profile_photo_url.clone();
 
         Ok(user)
     }
 
     /// Convert domain entity to database model
     pub fn from_domain(user: &User) -> Self {
-        let role_str = match user.role() {
-            UserRole::Citizen => "citizen",
-            UserRole::Volunteer => "volunteer",
-            UserRole::Responder => "responder",
-            UserRole::Admin => "admin",
-            UserRole::SuperAdmin => "super_admin",
-        };
-
-        let (street, city, province, postal_code, country) = match user.address() {
-            Some(addr) => (
-                Some(addr.street.clone()),
-                Some(addr.city.clone()),
-                Some(addr.province.clone()),
-                addr.postal_code.clone(),
-                Some(addr.country.clone()),
-            ),
-            None => (None, None, None, None, None),
+        let (is_active, is_verified) = match user.status() {
+            UserStatus::Active => (Some(true), Some(true)),
+            UserStatus::Pending => (Some(true), Some(false)),
+            _ => (Some(false), Some(false)),
         };
 
         Self {
             id: user.id().value(),
-            email: user.email().value().to_string(),
+            username: user.username().value().to_string(),
             password_hash: user.password_hash().to_string(),
-            full_name: user.full_name().to_string(),
-            phone_number: user.phone_number().map(|p| p.value().to_string()),
-            role: role_str.to_string(),
-            status: user.status().to_string(),
-            address_street: street,
-            address_city: city,
-            address_province: province,
-            address_postal_code: postal_code,
-            address_country: country,
-            created_at: user.created_at(),
-            updated_at: user.updated_at(),
-            last_login: user.last_login(),
-            version: user.version() as i64,
+            email: user.email().value().to_string(),
+            phone: user.phone_number().map(|p| p.value().to_string()),
+            role_id: None,
+            full_name: Some(user.full_name().to_string()),
+            address: user.address.clone(),
+            profile_photo_url: user.profile.avatar_url.clone(),
+            bio: user.profile.bio.clone(),
+            date_of_birth: None,
+            gender: None,
+            is_verified,
+            is_active,
+            last_login: user.last_login.map(|t| t.naive_utc()),
+            created_at: Some(user.created_at.naive_utc()),
+            updated_at: Some(user.updated_at.naive_utc()),
         }
     }
 }
 
 /// PostgreSQL implementation of UserRepository with caching
 pub struct PostgresUserRepository {
-    pool: Arc<Pool<ConnectionManager<PgConnection>>>,
+    pool: DbPool,
     cache: Arc<dyn CacheService>,
 }
 
 impl PostgresUserRepository {
     pub fn new(
-        pool: Arc<Pool<ConnectionManager<PgConnection>>>,
+        pool: DbPool,
         cache: Arc<dyn CacheService>,
     ) -> Self {
         Self { pool, cache }
@@ -168,7 +137,7 @@ impl PostgresUserRepository {
 
     /// Invalidate user cache
     async fn invalidate_user_cache(&self, user_id: &UserId, email: &Email) -> AppResult<()> {
-        let user_key = CacheKeys::user(&user_id.value().to_string());
+        let user_key = CacheKeys::user(&user_id.value());
         let email_key = CacheKeys::user_by_email(email.value());
         
         let _ = self.cache.delete(&user_key).await;
@@ -180,66 +149,71 @@ impl PostgresUserRepository {
 
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
-    async fn find_by_id(&self, id: &UserId) -> AppResult<Option<User>> {
-        let cache_key = CacheKeys::user(&id.value().to_string());
-        
-        // Try cache first
-        if let Ok(Some(user)) = self.cache.get::<User>(&cache_key).await {
-            return Ok(Some(user));
+    async fn find_by_id(&self, uid: &UserId) -> AppResult<Option<User>> {
+        let cache_key = CacheKeys::user(&uid.value());
+
+        // Try cache first (typed via JSON string)
+        if let Some(json_str) = self.cache.get_string(&cache_key).await? {
+            if let Ok(user) = serde_json::from_str::<User>(&json_str) {
+                return Ok(Some(user));
+            }
         }
 
         // Query database
-        use self::users::dsl::*;
-        
+        use crate::infrastructure::database::schemas::users::dsl::*;
+
         let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
         let user_model: Option<UserModel> = users
-            .filter(id.eq(id.value()))
+            .filter(id.eq(uid.value()))
             .first(&mut conn)
             .optional()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
 
         match user_model {
             Some(model) => {
                 let user = model.to_domain()?;
                 
                 // Cache the result
-                let _ = self.cache.set(&cache_key, &user, Some(Self::USER_CACHE_TTL)).await;
-                
+                let _ = self.cache.set_string(&cache_key, serde_json::to_string(&user).unwrap_or_default(), Some(Self::USER_CACHE_TTL)).await;
+
                 Ok(Some(user))
             }
             None => Ok(None),
         }
     }
 
-    async fn find_by_email(&self, email: &Email) -> AppResult<Option<User>> {
-        let cache_key = CacheKeys::user_by_email(email.value());
+    async fn find_by_email(&self, email_val: &Email) -> AppResult<Option<User>> {
+
+        let cache_key = CacheKeys::user_by_email(email_val.value());
         
         // Try cache first
-        if let Ok(Some(user)) = self.cache.get::<User>(&cache_key).await {
-            return Ok(Some(user));
+        if let Some(json_str) = self.cache.get_string(&cache_key).await? {
+            if let Ok(user) = serde_json::from_str::<User>(&json_str) {
+                return Ok(Some(user));
+            }
         }
 
         // Query database
-        use self::users::dsl::*;
-        
+        use crate::infrastructure::database::schemas::users::dsl::*;
+
         let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
         let user_model: Option<UserModel> = users
-            .filter(email.eq(email.value()))
+            .filter(email.eq(email_val.value()))
             .first(&mut conn)
             .optional()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
 
         match user_model {
             Some(model) => {
                 let user = model.to_domain()?;
                 
                 // Cache the result
-                let _ = self.cache.set(&cache_key, &user, Some(Self::USER_CACHE_TTL)).await;
-                
+                let _ = self.cache.set_string(&cache_key, serde_json::to_string(&user).unwrap_or_default(), Some(Self::USER_CACHE_TTL)).await;
+
                 Ok(Some(user))
             }
             None => Ok(None),
@@ -247,36 +221,34 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn save(&self, user: &User) -> AppResult<User> {
-        use self::users::dsl::*;
-        
+        use crate::infrastructure::database::schemas::users::dsl::*;
+
         let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
         let user_model = UserModel::from_domain(user);
 
-        // Use upsert (INSERT ... ON CONFLICT UPDATE)
+        // Upsert by id
         let saved_model = diesel::insert_into(users)
             .values(&user_model)
             .on_conflict(id)
             .do_update()
             .set((
-                email.eq(&user_model.email),
+                username.eq(&user_model.username),
                 password_hash.eq(&user_model.password_hash),
+                email.eq(&user_model.email),
+                phone.eq(&user_model.phone),
                 full_name.eq(&user_model.full_name),
-                phone_number.eq(&user_model.phone_number),
-                role.eq(&user_model.role),
-                status.eq(&user_model.status),
-                address_street.eq(&user_model.address_street),
-                address_city.eq(&user_model.address_city),
-                address_province.eq(&user_model.address_province),
-                address_postal_code.eq(&user_model.address_postal_code),
-                address_country.eq(&user_model.address_country),
-                updated_at.eq(chrono::Utc::now()),
+                address.eq(&user_model.address),
+                profile_photo_url.eq(&user_model.profile_photo_url),
+                bio.eq(&user_model.bio),
+                is_verified.eq(&user_model.is_verified),
+                is_active.eq(&user_model.is_active),
                 last_login.eq(&user_model.last_login),
-                version.eq(&user_model.version),
+                updated_at.eq(Some(chrono::Utc::now().naive_utc())),
             ))
             .get_result::<UserModel>(&mut conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
 
         let saved_user = saved_model.to_domain()?;
         
@@ -286,21 +258,48 @@ impl UserRepository for PostgresUserRepository {
         Ok(saved_user)
     }
 
-    async fn delete(&self, id: &UserId) -> AppResult<bool> {
-        use self::users::dsl::*;
-        
+    async fn update(&self, user: &User) -> AppResult<User> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get()
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let user_model = UserModel::from_domain(user);
+        let updated_model = diesel::update(users.filter(id.eq(user_model.id)))
+            .set((
+                username.eq(&user_model.username),
+                password_hash.eq(&user_model.password_hash),
+                email.eq(&user_model.email),
+                phone.eq(&user_model.phone),
+                full_name.eq(&user_model.full_name),
+                address.eq(&user_model.address),
+                profile_photo_url.eq(&user_model.profile_photo_url),
+                bio.eq(&user_model.bio),
+                is_verified.eq(&user_model.is_verified),
+                is_active.eq(&user_model.is_active),
+                last_login.eq(&user_model.last_login),
+                updated_at.eq(Some(chrono::Utc::now().naive_utc())),
+            ))
+            .get_result::<UserModel>(&mut conn)
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        let updated = updated_model.to_domain()?;
+        self.invalidate_user_cache(updated.id(), updated.email()).await?;
+        Ok(updated)
+    }
+
+    async fn delete(&self, uid: &UserId) -> AppResult<bool> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+
         // Get user first for cache invalidation
-        let user = match self.find_by_id(id).await? {
+        let user = match self.find_by_id(uid).await? {
             Some(user) => user,
             None => return Ok(false),
         };
 
         let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
-        let deleted_count = diesel::delete(users.filter(id.eq(id.value())))
+        let deleted_count = diesel::delete(users.filter(id.eq(uid.value())))
             .execute(&mut conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
 
         if deleted_count > 0 {
             // Invalidate cache
@@ -311,92 +310,138 @@ impl UserRepository for PostgresUserRepository {
         }
     }
 
+    async fn find_all(&self) -> AppResult<Vec<User>> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get()
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let user_models: Vec<UserModel> = users
+            .load(&mut conn)
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        let mut result = Vec::new();
+        for m in user_models { if let Ok(u) = m.to_domain() { result.push(u); } }
+        Ok(result)
+    }
+
     async fn find_users_in_radius(
         &self,
-        center: &Coordinates,
-        radius_km: f64,
+        _center: &Coordinates,
+        _radius_km: f64,
     ) -> AppResult<Vec<User>> {
-        // This is a simplified implementation
-        // In production, you'd use PostGIS for efficient geospatial queries
-        use self::users::dsl::*;
-        
+        // Placeholder: return active users without geo filtering (no location table)
+        use crate::infrastructure::database::schemas::users::dsl::*;
         let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        // For now, get all active users and filter in memory
-        // In production, use PostGIS ST_DWithin function
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
         let user_models: Vec<UserModel> = users
-            .filter(status.eq("active"))
+            .filter(is_active.eq(true))
             .load(&mut conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
         let mut nearby_users = Vec::new();
-        
         for model in user_models {
-            // In a real implementation, you'd have user location data
-            // For now, we'll return all active users as a placeholder
             if let Ok(user) = model.to_domain() {
                 nearby_users.push(user);
             }
         }
-
         Ok(nearby_users)
     }
 
-    async fn find_by_role(&self, role: &UserRole) -> AppResult<Vec<User>> {
-        use self::users::dsl::*;
-        
-        let role_str = match role {
-            UserRole::Citizen => "citizen",
-            UserRole::Volunteer => "volunteer",
-            UserRole::Responder => "responder",
-            UserRole::Admin => "admin",
-            UserRole::SuperAdmin => "super_admin",
-        };
-
-        let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let user_models: Vec<UserModel> = users
-            .filter(role.eq(role_str))
-            .filter(status.eq("active"))
-            .load(&mut conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let mut result_users = Vec::new();
-        for model in user_models {
-            if let Ok(user) = model.to_domain() {
-                result_users.push(user);
-            }
-        }
-
-        Ok(result_users)
+    async fn find_by_role(&self, _role: &UserRole) -> AppResult<Vec<User>> {
+        // TODO: implement join with roles/user_roles to filter by role. For now, return active users.
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get().map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let rows: Vec<UserModel> = users.filter(is_active.eq(true)).load(&mut conn).map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        Ok(rows.into_iter().filter_map(|m| m.to_domain().ok()).collect())
     }
 
-    async fn count_by_status(&self, status: &str) -> AppResult<u64> {
-        use self::users::dsl::*;
-        
-        let cache_key = format!("user_count:status:{}", status);
-        
-        // Try cache first (short TTL for counts)
-        if let Ok(Some(count)) = self.cache.get::<u64>(&cache_key).await {
-            return Ok(count);
+    async fn count_by_status(&self, status_val: &str) -> AppResult<u64> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let cache_key = format!("user_count:status:{}", status_val);
+        if let Some(s) = self.cache.get_string(&cache_key).await? {
+            if let Ok(cached) = s.parse::<u64>() { return Ok(cached); }
         }
-
         let mut conn = self.pool.get()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let count: i64 = users
-            .filter(status.eq(status))
-            .count()
-            .get_result(&mut conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let count_u64 = count as u64;
-        
-        // Cache for 1 minute
-        let _ = self.cache.set(&cache_key, &count_u64, Some(Duration::from_secs(60))).await;
-
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let query = match status_val.to_lowercase().as_str() {
+            "active" => users.filter(is_active.eq(true)).into_boxed(),
+            "inactive" => users.filter(is_active.eq(false)).into_boxed(),
+            "pending" => users.filter(is_verified.eq(false)).into_boxed(),
+            _ => users.into_boxed(),
+        };
+        let count_i64: i64 = query.count().get_result(&mut conn).map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        let count_u64 = count_i64 as u64;
+        let _ = self.cache.set_string(&cache_key, count_u64.to_string(), Some(Duration::from_secs(60))).await;
         Ok(count_u64)
+    }
+
+    async fn find_by_username(&self, username_val: &str) -> AppResult<Option<User>> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get().map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let model: Option<UserModel> = users
+            .filter(username.eq(username_val))
+            .first::<UserModel>(&mut conn)
+            .optional()
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        Ok(model.and_then(|m| m.to_domain().ok()))
+    }
+
+    async fn find_active_responders(&self) -> AppResult<Vec<User>> {
+        // TODO: implement join with roles to filter responders; currently returns active users only
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get().map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let models: Vec<UserModel> = users.filter(is_active.eq(true)).load(&mut conn).map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        Ok(models.into_iter().filter_map(|m| m.to_domain().ok()).collect())
+    }
+
+    async fn update_last_login(&self, user_id_val: &crate::shared::UserId) -> AppResult<bool> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get()
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let now = Utc::now().naive_utc();
+        let updated = diesel::update(users.filter(id.eq(user_id_val.value())))
+            .set((last_login.eq(Some(now)), updated_at.eq(Some(now))))
+            .execute(&mut conn)
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        if updated > 0 {
+            let _ = self.cache.delete(&CacheKeys::user(&user_id_val.value())).await;
+        }
+        Ok(updated > 0)
+    }
+
+    async fn verify_email(&self, user_id_val: &crate::shared::UserId) -> AppResult<bool> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get()
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let now = Utc::now().naive_utc();
+        let updated = diesel::update(users.filter(id.eq(user_id_val.value())))
+            .set((is_verified.eq(true), is_active.eq(true), updated_at.eq(Some(now))))
+            .execute(&mut conn)
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        if updated > 0 {
+            let _ = self.cache.delete(&CacheKeys::user(&user_id_val.value())).await;
+        }
+        Ok(updated > 0)
+    }
+
+    async fn update_password(&self, user_id_val: &crate::shared::UserId, new_password_hash: &str) -> AppResult<bool> {
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get()
+            .map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let now = Utc::now().naive_utc();
+        let updated = diesel::update(users.filter(id.eq(user_id_val.value())))
+            .set((password_hash.eq(new_password_hash), updated_at.eq(Some(now))))
+            .execute(&mut conn)
+            .map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        if updated > 0 {
+            // Invalidate cache keys best-effort: user key; email unknown here
+            let _ = self.cache.delete(&CacheKeys::user(&user_id_val.value())).await;
+        }
+        Ok(updated > 0)
+    }
+
+    async fn count_by_role(&self, _role_val: &UserRole) -> AppResult<u64> {
+        // TODO: implement using roles tables; for now count active users
+        use crate::infrastructure::database::schemas::users::dsl::*;
+        let mut conn = self.pool.get().map_err(|e|AppError::Database(DatabaseError::ConnectionPool(e)))?;
+        let count_i64: i64 = users.filter(is_active.eq(true)).count().get_result(&mut conn).map_err(|e|AppError::Database(DatabaseError::Diesel(e)))?;
+        Ok(count_i64 as u64)
     }
 }

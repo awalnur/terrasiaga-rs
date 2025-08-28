@@ -7,13 +7,10 @@ pub mod logging;
 pub mod errors;
 
 // Re-export middleware functions and types
-pub use auth::{JwtMiddleware, JwtMiddlewareFactory, AuthMiddleware, PasetoAuthMiddleware, AuthSession};
+pub use auth::{AuthMiddleware, AuthSession};
 pub use cors::configure_cors;
 pub use logging::{init_logger, configure_logger as configure_request_logger};
 pub use errors::ErrorHandler;
 
 // Create jwt_middleware alias for backward compatibility
-pub use auth::JwtMiddlewareFactory as jwt_middleware;
-
 // Provide backward compatibility aliases
-pub use AuthMiddleware as RequestLogger;

@@ -7,12 +7,16 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::application::use_cases::{UseCase, ValidatedUseCase};
-use crate::domain::entities::{Notification, Disaster};
+use crate::domain::entities::Notification;
+use crate::domain::entities::disaster::DisasterSeverity;
 use crate::domain::value_objects::*;
 use crate::domain::ports::repositories::{NotificationRepository, UserRepository, DisasterRepository};
-use crate::domain::ports::services::{NotificationService, GeoService};
+use crate::domain::ports::services::{NotificationService, GeolocationService};
 use crate::domain::events::{NotificationSentEvent, MassNotificationTriggeredEvent, EventPublisher};
+use crate::Permission;
 use crate::shared::{AppResult, AppError};
+use crate::shared::types::Priority;
+use crate::domain::entities::notification::{NotificationType, NotificationChannel};
 
 /// Request to send emergency alert to users in affected area
 #[derive(Debug, Clone)]
@@ -47,7 +51,7 @@ pub struct SendEmergencyAlertUseCase {
     user_repository: Arc<dyn UserRepository>,
     disaster_repository: Arc<dyn DisasterRepository>,
     notification_service: Arc<dyn NotificationService>,
-    geo_service: Arc<dyn GeoService>,
+    geo_service: Arc<dyn GeolocationService>,
     event_publisher: Arc<dyn EventPublisher>,
 }
 
@@ -57,7 +61,7 @@ impl SendEmergencyAlertUseCase {
         user_repository: Arc<dyn UserRepository>,
         disaster_repository: Arc<dyn DisasterRepository>,
         notification_service: Arc<dyn NotificationService>,
-        geo_service: Arc<dyn GeoService>,
+        geo_service: Arc<dyn GeolocationService>,
         event_publisher: Arc<dyn EventPublisher>,
     ) -> Self {
         Self {
@@ -73,10 +77,11 @@ impl SendEmergencyAlertUseCase {
     /// Get message template based on alert type and severity
     fn get_alert_template(&self, alert_type: &str, severity: &DisasterSeverity) -> String {
         let urgency = match severity {
-            DisasterSeverity::Low => "PERHATIAN",
-            DisasterSeverity::Medium => "PERINGATAN",
-            DisasterSeverity::High => "BAHAYA",
-            DisasterSeverity::Critical => "DARURAT",
+            DisasterSeverity::Minor => "PERHATIAN",
+            DisasterSeverity::Moderate => "PERINGATAN",
+            DisasterSeverity::Major => "BAHAYA",
+            DisasterSeverity::Severe => "DARURAT",
+            DisasterSeverity::Critical | DisasterSeverity::Catastrophic => "DARURAT",
         };
 
         match alert_type {
@@ -102,6 +107,36 @@ impl SendEmergencyAlertUseCase {
         let volume_factor = (recipient_count / 1000).max(1) as u32;
         base_time + (volume_factor * 10)
     }
+
+    fn map_severity_to_priority(&self, severity: &DisasterSeverity) -> Priority {
+        match severity {
+            DisasterSeverity::Minor => Priority::Low,
+            DisasterSeverity::Moderate => Priority::Normal,
+            DisasterSeverity::Major => Priority::High,
+            DisasterSeverity::Severe => Priority::Critical,
+            DisasterSeverity::Critical | DisasterSeverity::Catastrophic => Priority::Emergency,
+        }
+    }
+
+    fn map_channel_str(&self, ch: &str) -> Option<NotificationChannel> {
+        match ch.to_lowercase().as_str() {
+            "sms" => Some(NotificationChannel::SMS),
+            "email" => Some(NotificationChannel::Email),
+            "push" => Some(NotificationChannel::Push),
+            "whatsapp" => Some(NotificationChannel::WhatsApp),
+            _ => None,
+        }
+    }
+
+    fn map_type_str(&self, t: &str) -> NotificationType {
+        match t {
+            "evacuation" => NotificationType::EmergencyResponse,
+            "shelter" => NotificationType::ReminderNotification,
+            "warning" => NotificationType::StatusUpdate,
+            "all_clear" => NotificationType::SystemNotification,
+            other => NotificationType::Other(other.to_string()),
+        }
+    }
 }
 
 #[async_trait]
@@ -119,7 +154,7 @@ impl ValidatedUseCase<SendEmergencyAlertRequest, EmergencyAlertResponse> for Sen
             .await?
             .ok_or_else(|| AppError::NotFound("Sender not found".to_string()))?;
 
-        if !sender.role().can_perform("send_emergency_alerts") {
+        if !sender.role().has_permission(&Permission::SendNotifications) {
             return Err(AppError::Forbidden("Insufficient permissions to send emergency alerts".to_string()));
         }
 
@@ -182,59 +217,71 @@ impl UseCase<SendEmergencyAlertRequest, EmergencyAlertResponse> for SendEmergenc
         // Prepare notification message
         let template_message = self.get_alert_template(&request.alert_type, &request.severity);
         let full_message = format!("{}\n\n{}", template_message, request.message);
+        let notif_type = self.map_type_str(&request.alert_type);
+        let priority = self.map_severity_to_priority(&request.severity);
 
         // Send notifications through all specified channels
         let mut notifications_sent = 0u32;
         let mut failed_deliveries = 0u32;
 
         for user in &affected_users {
-            for channel in &request.channels {
-                // Create notification record
-                let notification_id = NotificationId::new();
-                let notification = Notification::new(
-                    notification_id.clone(),
-                    user.id(),
-                    "emergency_alert".to_string(),
-                    request.alert_type.clone(),
-                    full_message.clone(),
-                    channel.clone(),
-                    request.severity.priority_level(),
-                    sent_at,
-                    request.expires_at,
-                )?;
+            // Determine channels
+            let mut channels = Vec::new();
+            for ch in &request.channels {
+                if let Some(mapped) = self.map_channel_str(ch.as_str()) {
+                    channels.push(mapped);
+                }
+            }
+            if channels.is_empty() { continue; }
 
-                // Save notification
-                match self.notification_repository.save(&notification).await {
+            // Build domain notification (single entity with multiple channels)
+            let mut notification = Notification::new(
+                user.id().clone(),
+                "Emergency Alert".to_string(),
+                full_message.clone(),
+                notif_type.clone(),
+                priority.clone(),
+                channels.clone(),
+            )?;
+
+            // Save notification
+            let saved = self.notification_repository.save(&notification).await?;
+
+            // Attempt to send per channel
+            for ch in &channels {
+                let send_res = match ch {
+                    NotificationChannel::SMS => {
+                        if let Some(phone) = user.phone_number() { self.notification_service.send_sms(phone.value(), &full_message).await }
+                        else { Err(AppError::Validation("User has no phone number".to_string())) }
+                    }
+                    NotificationChannel::Email => {
+                        self.notification_service.send_email(user.email().value(), "Emergency Alert", &full_message).await
+                    }
+                    NotificationChannel::WhatsApp => {
+                        if let Some(phone) = user.phone_number() { self.notification_service.send_whatsapp(phone.value(), &full_message).await }
+                        else { Err(AppError::Validation("User has no phone number".to_string())) }
+                    }
+                    NotificationChannel::Push | NotificationChannel::InApp => {
+                        self.notification_service.send_push_notification(user.id().clone(), "Emergency Alert", &full_message).await
+                    }
+                };
+
+                match send_res {
                     Ok(_) => {
-                        // Attempt to send via external service
-                        match self.notification_service
-                            .send_notification(&user, &notification, channel)
-                            .await 
-                        {
-                            Ok(_) => {
-                                notifications_sent += 1;
-
-                                // Publish event
-                                let event = NotificationSentEvent {
-                                    event_id: Uuid::new_v4(),
-                                    notification_id: notification_id.clone(),
-                                    recipient_id: user.id(),
-                                    notification_type: "emergency_alert".to_string(),
-                                    channel: channel.clone(),
-                                    content: full_message.clone(),
-                                    occurred_at: sent_at,
-                                    version: 1,
-                                };
-                                let _ = self.event_publisher.publish(&event).await;
-                            }
-                            Err(_) => {
-                                failed_deliveries += 1;
-                            }
-                        }
+                        notifications_sent += 1;
+                        let event = NotificationSentEvent {
+                            event_id: Uuid::new_v4(),
+                            notification_id: saved.id,
+                            recipient_id: *user.id(),
+                            notification_type: "emergency_alert".to_string(),
+                            channel: match ch { NotificationChannel::SMS => "sms", NotificationChannel::Email => "email", NotificationChannel::WhatsApp => "whatsapp", _ => "push" }.to_string(),
+                            content: full_message.clone(),
+                            occurred_at: sent_at,
+                            version: 1,
+                        };
+                        let _ = self.event_publisher.publish(&event).await;
                     }
-                    Err(_) => {
-                        failed_deliveries += 1;
-                    }
+                    Err(_) => { failed_deliveries += 1; }
                 }
             }
         }
@@ -304,6 +351,18 @@ impl SendCustomNotificationUseCase {
             event_publisher,
         }
     }
+
+    // Helper to map string to NotificationChannel
+    fn map_channel_str(&self, ch: &str) -> Option<NotificationChannel> {
+        match ch.to_lowercase().as_str() {
+            "sms" => Some(NotificationChannel::SMS),
+            "email" => Some(NotificationChannel::Email),
+            "push" => Some(NotificationChannel::Push),
+            "whatsapp" => Some(NotificationChannel::WhatsApp),
+            "inapp" | "in_app" | "in-app" => Some(NotificationChannel::InApp),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -315,7 +374,7 @@ impl ValidatedUseCase<SendCustomNotificationRequest, Vec<NotificationId>> for Se
             .await?
             .ok_or_else(|| AppError::NotFound("Sender not found".to_string()))?;
 
-        if !sender.role().can_perform("send_notifications") {
+        if !sender.role().has_permission(&Permission::SendNotifications) {
             return Err(AppError::Forbidden("Insufficient permissions to send notifications".to_string()));
         }
 
@@ -367,46 +426,60 @@ impl UseCase<SendCustomNotificationRequest, Vec<NotificationId>> for SendCustomN
                 None => continue, // Skip if user not found
             };
 
-            for channel in &request.channels {
-                // Create notification
-                let notification_id = NotificationId::new();
-                let notification = Notification::new(
-                    notification_id.clone(),
-                    user.id(),
-                    request.notification_type.clone(),
-                    request.title.clone(),
-                    request.message.clone(),
-                    channel.clone(),
-                    request.priority,
-                    sent_at,
-                    request.expires_at,
-                )?;
+            // Map channels
+            let mut channels = Vec::new();
+            for ch in &request.channels { if let Some(c) = self.map_channel_str(ch.as_str()) { channels.push(c); } }
+            if channels.is_empty() { continue; }
 
-                // Save and send notification
-                if let Ok(_) = self.notification_repository.save(&notification).await {
-                    if let Ok(_) = self.notification_service
-                        .send_notification(&user, &notification, channel)
-                        .await 
-                    {
-                        sent_notifications.push(notification_id.clone());
+            // Create notification
+            let mut notification = Notification::new(
+                user.id().clone(),
+                request.title.clone(),
+                request.message.clone(),
+                NotificationType::Other(request.notification_type.clone()),
+                match request.priority { 1 => Priority::Low, 2 => Priority::Normal, 3 => Priority::High, 4 => Priority::Critical, 5 => Priority::Emergency, _ => Priority::Normal},
+                channels.clone(),
+            )?;
 
-                        // Publish event
-                        let event = NotificationSentEvent {
-                            event_id: Uuid::new_v4(),
-                            notification_id: notification_id.clone(),
-                            recipient_id: user.id(),
-                            notification_type: request.notification_type.clone(),
-                            channel: channel.clone(),
-                            content: request.message.clone(),
-                            occurred_at: sent_at,
-                            version: 1,
-                        };
-                        let _ = self.event_publisher.publish(&event).await;
+            // Save and send notification
+            let saved = self.notification_repository.save(&notification).await?;
+
+            for ch in &channels {
+                let send_res = match ch {
+                    NotificationChannel::SMS => {
+                        if let Some(phone) = user.phone_number() { self.notification_service.send_sms(phone.value(), &request.message).await }
+                        else { Err(AppError::Validation("User has no phone number".to_string())) }
                     }
+                    NotificationChannel::Email => {
+                        self.notification_service.send_email(user.email().value(), &request.title, &request.message).await
+                    }
+                    NotificationChannel::WhatsApp => {
+                        if let Some(phone) = user.phone_number() { self.notification_service.send_whatsapp(phone.value(), &request.message).await }
+                        else { Err(AppError::Validation("User has no phone number".to_string())) }
+                    }
+                    NotificationChannel::Push | NotificationChannel::InApp => {
+                        self.notification_service.send_push_notification(user.id().clone(), &request.title, &request.message).await
+                    }
+                };
+
+                if send_res.is_ok() {
+                    sent_notifications.push(saved.id);
+                    let event = NotificationSentEvent {
+                        event_id: Uuid::new_v4(),
+                        notification_id: saved.id,
+                        recipient_id: user.id().clone(),
+                        notification_type: request.notification_type.clone(),
+                        channel: match ch { NotificationChannel::SMS => "sms", NotificationChannel::Email => "email", NotificationChannel::WhatsApp => "whatsapp", _ => "push" }.to_string(),
+                        content: request.message.clone(),
+                        occurred_at: sent_at,
+                        version: 1,
+                    };
+                    let _ = self.event_publisher.publish(&event).await;
                 }
             }
         }
 
         Ok(sent_notifications)
     }
+
 }

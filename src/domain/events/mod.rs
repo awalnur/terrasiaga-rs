@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::domain::value_objects::*;
+use crate::domain::entities::disaster::DisasterSeverity;
 
 /// Base trait for all domain events
 pub trait DomainEvent: Send + Sync + std::fmt::Debug {

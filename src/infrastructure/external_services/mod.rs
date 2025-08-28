@@ -98,6 +98,7 @@ pub struct SmsConfig {
     pub api_key: String,
     pub from_number: Option<String>,
     pub timeout: Duration,
+    pub api_secret: String,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +379,7 @@ impl SmsConfig {
             api_key,
             from_number,
             timeout: Duration::from_secs(30),
+            api_secret: "".to_string(),
         })
     }
 }

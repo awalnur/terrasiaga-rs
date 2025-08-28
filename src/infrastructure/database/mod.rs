@@ -1,12 +1,15 @@
 // Improved database infrastructure with better connection management and health monitoring
 // Provides robust database connectivity with proper error handling and monitoring
 
+pub mod schemas;
+
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
-use crate::shared::error::{AppResult, AppError};
+use crate::config::DatabaseConfig;
+use crate::shared::error::{AppResult, AppError, DatabaseError};
 
 pub type DbPool = Pool<ConnectionManager<PgConnection>>;
 pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
@@ -14,16 +17,6 @@ pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 /// Database configuration with environment-specific settings
-#[derive(Debug, Clone)]
-pub struct DatabaseConfig {
-    pub url: String,
-    pub max_connections: u32,
-    pub min_connections: u32,
-    pub connection_timeout: Duration,
-    pub idle_timeout: Duration,
-    pub max_lifetime: Duration,
-    pub enable_logging: bool,
-}
 
 impl DatabaseConfig {
     /// Create database config from environment
@@ -71,23 +64,17 @@ impl DatabaseService {
             .max_lifetime(Some(config.max_lifetime))
             .test_on_check_out(true)
             .build(manager)
-            .map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UnableToSendCommand,
-                Box::new(e.to_string())
-            )))?;
+            .map_err(|e| AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
         // Test connection
         {
             let mut conn = pool.get()
-                .map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-                    diesel::result::DatabaseErrorKind::UnableToSendCommand,
-                    Box::new(e.to_string())
-                )))?;
+                .map_err(|e| AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
             // Simple health check query
             diesel::sql_query("SELECT 1")
                 .execute(&mut conn)
-                .map_err(|e| AppError::Database(e))?;
+                .map_err(|e| AppError::Database(DatabaseError::Diesel(e)))?;
         }
 
         Ok(Self { pool, config })
@@ -96,10 +83,7 @@ impl DatabaseService {
     /// Get database connection from pool
     pub fn get_connection(&self) -> AppResult<DbConnection> {
         self.pool.get()
-            .map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UnableToSendCommand,
-                Box::new(e.to_string())
-            )))
+            .map_err(|e| AppError::Database(DatabaseError::ConnectionPool(e)))
     }
 
     /// Run database migrations
@@ -107,10 +91,7 @@ impl DatabaseService {
         let mut conn = self.get_connection()?;
 
         conn.run_pending_migrations(MIGRATIONS)
-            .map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UnableToSendCommand,
-                Box::new(e.to_string())
-            )))?;
+            .map_err(|e| AppError::Database(DatabaseError::Other(e.to_string())))?;
 
         Ok(())
     }
@@ -156,10 +137,8 @@ impl DatabaseService {
 
         conn.transaction::<T, AppError, _>(|conn| {
             f(conn)
-        }).map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UnableToSendCommand,
-            Box::new(e.to_string())
-        )))
+        })
+
     }
 
     /// Get pool statistics
@@ -234,20 +213,14 @@ pub mod utils {
             .max_size(1)
             .connection_timeout(Duration::from_secs(5))
             .build(manager)
-            .map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UnableToSendCommand,
-                Box::new(e.to_string())
-            )))?;
+            .map_err(|e| AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
         let mut conn = pool.get()
-            .map_err(|e| AppError::Database(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UnableToSendCommand,
-                Box::new(e.to_string())
-            )))?;
+            .map_err(|e| AppError::Database(DatabaseError::ConnectionPool(e)))?;
 
         diesel::sql_query("SELECT 1")
             .execute(&mut conn)
-            .map_err(|e| AppError::Database(e))?;
+            .map_err(|e| AppError::Database(DatabaseError::Diesel(e)))?;
 
         Ok(true)
     }

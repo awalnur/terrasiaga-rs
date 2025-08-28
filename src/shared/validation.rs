@@ -10,19 +10,15 @@ use crate::shared::types::{is_valid_email, is_valid_phone};
 /// Validate request using garde validation
 pub fn validate_request<T>(request: &T) -> AppResult<()>
 where
-    T: Validate,
+    T: Validate<Context = ()>,
 {
-    match request.validate() {
+    match request.validate(&()) {
         Ok(_) => Ok(()),
         Err(errors) => {
-            let error_messages: Vec<String> = errors
-                .iter()
-                .map(|(field, error)| format!("{}: {}", field, error))
-                .collect();
-
+            // Use garde's built-in formatter for robust, readable messages
             Err(AppError::Validation(format!(
                 "Validation failed: {}",
-                error_messages.join(", ")
+                errors
             )))
         }
     }
@@ -31,7 +27,7 @@ where
 /// Validate JSON payload and deserialize
 pub fn validate_json<T>(json_str: &str) -> AppResult<T>
 where
-    T: DeserializeOwned + Validate,
+    T: DeserializeOwned + Validate<Context = ()>,
 {
     let data: T = serde_json::from_str(json_str)
         .map_err(|e| AppError::Validation(format!("Invalid JSON: {}", e)))?;
@@ -128,7 +124,7 @@ pub mod validators {
     }
 
     /// Validate pagination parameters
-    pub fn validate_pagination(limit: u32, offset: u32) -> AppResult<()> {
+    pub fn validate_pagination(limit: u32, _offset: u32) -> AppResult<()> {
         if limit == 0 {
             return Err(AppError::Validation(
                 "Limit must be greater than 0".to_string()
@@ -201,7 +197,6 @@ pub mod validators {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::validators::*;
 
     #[test]

@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use crate::shared::{DisasterId, UserId, LocationId, AppResult, AppError, AuditFields, Priority};
 use crate::domain::value_objects::Coordinates;
+use crate::shared::types::SeverityLevel;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Disaster {
@@ -16,8 +17,7 @@ pub struct Disaster {
     pub severity: DisasterSeverity,
     pub status: DisasterStatus,
     pub priority: Priority,
-    pub location_id: Option<LocationId>,
-    pub coordinates: Option<Coordinates>,
+    pub location: Coordinates,
     pub reporter_id: UserId,
     pub assigned_responders: Vec<UserId>,
     pub affected_population: Option<u32>,
@@ -25,7 +25,9 @@ pub struct Disaster {
     pub resources_needed: Vec<ResourceNeed>,
     pub timeline: DisasterTimeline,
     pub verification: VerificationInfo,
-    pub audit: AuditFields,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,31 +51,34 @@ pub enum DisasterSeverity {
     Moderate = 2,
     Major = 3,
     Severe = 4,
-    Catastrophic = 5,
+    Critical = 5,
+    Catastrophic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DisasterStatus {
     Reported,
     Verified,
-    InProgress,
-    Contained,
+    Responded,
     Resolved,
     Closed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EstimatedDamage {
-    pub economic_loss: Option<u64>, // In Indonesian Rupiah
-    pub infrastructure_damage: Option<String>,
-    pub environmental_impact: Option<String>,
+    pub economic_loss: Option<f64>,
+    pub casualties: u32,
+    pub injuries: u32,
+    pub displaced_people: u32,
+    pub damaged_buildings: u32,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceNeed {
     pub resource_type: String,
     pub quantity: u32,
-    pub priority: Priority,
+    pub urgency: Priority,
     pub description: Option<String>,
 }
 
@@ -82,9 +87,9 @@ pub struct DisasterTimeline {
     pub reported_at: DateTime<Utc>,
     pub occurred_at: Option<DateTime<Utc>>,
     pub verified_at: Option<DateTime<Utc>>,
-    pub response_started_at: Option<DateTime<Utc>>,
-    pub contained_at: Option<DateTime<Utc>>,
+    pub first_response_at: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub closed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +97,8 @@ pub struct VerificationInfo {
     pub is_verified: bool,
     pub verified_by: Option<UserId>,
     pub verified_at: Option<DateTime<Utc>>,
-    pub verification_notes: Option<String>,
-    pub confidence_score: Option<f32>, // 0.0 to 1.0
+    pub verification_method: Option<String>,
+    pub confidence_score: Option<f32>,
 }
 
 impl Disaster {
@@ -103,31 +108,19 @@ impl Disaster {
         description: String,
         disaster_type: DisasterType,
         severity: DisasterSeverity,
+        location: Coordinates,
         reporter_id: UserId,
-        coordinates: Option<Coordinates>,
-    ) -> AppResult<Self> {
-        // Business rules validation
-        if title.trim().is_empty() {
-            return Err(AppError::Validation("Disaster title cannot be empty".to_string()));
-        }
-
-        if description.trim().is_empty() {
-            return Err(AppError::Validation("Disaster description cannot be empty".to_string()));
-        }
-
+    ) -> Self {
         let now = Utc::now();
-        let priority = Self::calculate_initial_priority(&disaster_type, &severity);
-
-        Ok(Self {
-            id: DisasterId(Uuid::new_v4()),
-            title: title.trim().to_string(),
-            description: description.trim().to_string(),
+        Self {
+            id: DisasterId::new(),
+            title,
+            description,
             disaster_type,
-            severity,
+            severity: severity.clone(),
             status: DisasterStatus::Reported,
-            priority,
-            location_id: None,
-            coordinates,
+            priority: Self::calculate_priority(&severity),
+            location,
             reporter_id,
             assigned_responders: Vec::new(),
             affected_population: None,
@@ -137,157 +130,207 @@ impl Disaster {
                 reported_at: now,
                 occurred_at: None,
                 verified_at: None,
-                response_started_at: None,
-                contained_at: None,
+                first_response_at: None,
                 resolved_at: None,
+                closed_at: None,
             },
             verification: VerificationInfo {
                 is_verified: false,
                 verified_by: None,
                 verified_at: None,
-                verification_notes: None,
+                verification_method: None,
                 confidence_score: None,
             },
-            audit: AuditFields {
-                created_at: now,
-                updated_at: now,
-                created_by: Some(reporter_id),
-                updated_by: Some(reporter_id),
-            },
-        })
-    }
-
-    /// Verify the disaster report
-    pub fn verify(&mut self, verifier_id: UserId, notes: Option<String>) -> AppResult<()> {
-        match self.status {
-            DisasterStatus::Reported => {
-                self.status = DisasterStatus::Verified;
-                self.verification.is_verified = true;
-                self.verification.verified_by = Some(verifier_id);
-                self.verification.verified_at = Some(Utc::now());
-                self.verification.verification_notes = notes;
-                self.timeline.verified_at = Some(Utc::now());
-                self.audit.updated_at = Utc::now();
-                self.audit.updated_by = Some(verifier_id);
-                Ok(())
-            }
-            _ => Err(AppError::BusinessRuleViolation(
-                "Only reported disasters can be verified".to_string()
-            )),
+            created_at: now,
+            updated_at: now,
+            version: 1,
         }
     }
 
-    /// Start response to the disaster
-    pub fn start_response(&mut self, responder_ids: Vec<UserId>) -> AppResult<()> {
-        match self.status {
-            DisasterStatus::Verified => {
-                self.status = DisasterStatus::InProgress;
-                self.assigned_responders = responder_ids;
-                self.timeline.response_started_at = Some(Utc::now());
-                self.audit.updated_at = Utc::now();
-                Ok(())
-            }
-            _ => Err(AppError::BusinessRuleViolation(
-                "Only verified disasters can have response started".to_string()
-            )),
+    // Getter methods for clean architecture compliance
+    pub fn id(&self) -> &DisasterId { &self.id }
+    pub fn title(&self) -> &str { &self.title }
+    pub fn description(&self) -> &str { &self.description }
+    pub fn disaster_type(&self) -> &DisasterType { &self.disaster_type }
+    pub fn severity(&self) -> &DisasterSeverity { &self.severity }
+    pub fn status(&self) -> &DisasterStatus { &self.status }
+    pub fn priority(&self) -> &Priority { &self.priority }
+    pub fn location(&self) -> &Coordinates { &self.location }
+    pub fn reporter_id(&self) -> &UserId { &self.reporter_id }
+    pub fn assigned_responders(&self) -> &[UserId] { &self.assigned_responders }
+    pub fn affected_population(&self) -> Option<u32> { self.affected_population }
+    pub fn timeline(&self) -> &DisasterTimeline { &self.timeline }
+    pub fn verification(&self) -> &VerificationInfo { &self.verification }
+    pub fn created_at(&self) -> DateTime<Utc> { self.created_at }
+    pub fn updated_at(&self) -> DateTime<Utc> { self.updated_at }
+    pub fn version(&self) -> i64 { self.version }
+
+    /// Calculate priority based on severity
+    fn calculate_priority(severity: &DisasterSeverity) -> Priority {
+        match severity {
+            DisasterSeverity::Minor => Priority::Low,
+            DisasterSeverity::Moderate => Priority::Normal,
+            DisasterSeverity::Major => Priority::High,
+            DisasterSeverity::Severe => Priority::Critical,
+            DisasterSeverity::Critical => Priority::Emergency,
+            DisasterSeverity::Catastrophic => Priority::Emergency,
         }
     }
 
-    /// Mark disaster as contained
-    pub fn contain(&mut self, updater_id: UserId) -> AppResult<()> {
-        match self.status {
-            DisasterStatus::InProgress => {
-                self.status = DisasterStatus::Contained;
-                self.timeline.contained_at = Some(Utc::now());
-                self.audit.updated_at = Utc::now();
-                self.audit.updated_by = Some(updater_id);
-                Ok(())
-            }
-            _ => Err(AppError::BusinessRuleViolation(
-                "Only in-progress disasters can be contained".to_string()
-            )),
-        }
-    }
-
-    /// Mark disaster as resolved
-    pub fn resolve(&mut self, updater_id: UserId) -> AppResult<()> {
-        match self.status {
-            DisasterStatus::Contained => {
-                self.status = DisasterStatus::Resolved;
-                self.timeline.resolved_at = Some(Utc::now());
-                self.audit.updated_at = Utc::now();
-                self.audit.updated_by = Some(updater_id);
-                Ok(())
-            }
-            _ => Err(AppError::BusinessRuleViolation(
-                "Only contained disasters can be resolved".to_string()
-            )),
-        }
-    }
-
-    /// Add resource needs
-    pub fn add_resource_need(&mut self, resource_need: ResourceNeed) -> AppResult<()> {
-        // Business rule: Can only add resources for active disasters
-        match self.status {
-            DisasterStatus::Verified | DisasterStatus::InProgress | DisasterStatus::Contained => {
-                self.resources_needed.push(resource_need);
-                self.audit.updated_at = Utc::now();
-                Ok(())
-            }
-            _ => Err(AppError::BusinessRuleViolation(
-                "Cannot add resources to inactive disasters".to_string()
-            )),
-        }
-    }
-
-    /// Update severity and recalculate priority
+    /// Update disaster severity with business rules
     pub fn update_severity(&mut self, new_severity: DisasterSeverity, updater_id: UserId) -> AppResult<()> {
+        // Business rule: severity can only be escalated, not downgraded
+        if new_severity < self.severity {
+            return Err(AppError::BusinessRuleViolation(
+                "Disaster severity can only be escalated, not downgraded".to_string()
+            ));
+        }
+
         self.severity = new_severity;
-        self.priority = Self::calculate_initial_priority(&self.disaster_type, &self.severity);
-        self.audit.updated_at = Utc::now();
-        self.audit.updated_by = Some(updater_id);
+        self.priority = Self::calculate_priority(&self.severity);
+        self.updated_at = Utc::now();
+        self.version += 1;
         Ok(())
     }
 
-    /// Check if disaster is active (can be responded to)
-    pub fn is_active(&self) -> bool {
-        matches!(
-            self.status,
-            DisasterStatus::Verified | DisasterStatus::InProgress | DisasterStatus::Contained
-        )
-    }
+    /// Update disaster status
+    pub fn update_status(&mut self, new_status: DisasterStatus, updater_id: UserId) -> AppResult<()> {
+        // Validate status transition
+        self.validate_status_transition(&new_status)?;
 
-    /// Calculate response time in minutes
-    pub fn response_time_minutes(&self) -> Option<i64> {
-        if let (Some(response_started), Some(verified_at)) = (self.timeline.response_started_at, self.timeline.verified_at) {
-            Some((response_started - verified_at).num_minutes())
-        } else {
-            None
+        let now = Utc::now();
+        
+        // Update timeline based on status
+        match new_status {
+            DisasterStatus::Verified => {
+                if !self.verification.is_verified {
+                    self.verification.is_verified = true;
+                    self.verification.verified_by = Some(updater_id);
+                    self.verification.verified_at = Some(now);
+                    self.timeline.verified_at = Some(now);
+                }
+            },
+            DisasterStatus::Responded => {
+                if self.timeline.first_response_at.is_none() {
+                    self.timeline.first_response_at = Some(now);
+                }
+            },
+            DisasterStatus::Resolved => {
+                self.timeline.resolved_at = Some(now);
+            },
+            DisasterStatus::Closed => {
+                self.timeline.closed_at = Some(now);
+            },
+            _ => {}
         }
+
+        self.status = new_status;
+        self.updated_at = now;
+        self.version += 1;
+        Ok(())
     }
 
-    /// Calculate initial priority based on type and severity
-    fn calculate_initial_priority(disaster_type: &DisasterType, severity: &DisasterSeverity) -> Priority {
-        let base_priority = match severity {
-            DisasterSeverity::Minor => Priority::Low,
-            DisasterSeverity::Moderate => Priority::Medium,
-            DisasterSeverity::Major => Priority::High,
-            DisasterSeverity::Severe => Priority::Critical,
-            DisasterSeverity::Catastrophic => Priority::Emergency,
+    /// Validate status transition business rules
+    fn validate_status_transition(&self, new_status: &DisasterStatus) -> AppResult<()> {
+        use DisasterStatus::*;
+        
+        let valid = match (&self.status, new_status) {
+            (Reported, Verified) => true,
+            (Reported, Responded) => true, // Can skip verification in emergencies
+            (Verified, Responded) => true,
+            (Responded, Resolved) => true,
+            (Resolved, Closed) => true,
+            (current, new) if current == new => true, // Same status is ok
+            _ => false,
         };
 
-        // Adjust priority based on disaster type
-        match disaster_type {
-            DisasterType::Tsunami | DisasterType::VolcanicEruption | DisasterType::Earthquake => {
-                // These types are inherently more critical
-                match base_priority {
-                    Priority::Low => Priority::Medium,
-                    Priority::Medium => Priority::High,
-                    Priority::High => Priority::Critical,
-                    priority => priority,
-                }
-            }
-            _ => base_priority,
+        if !valid {
+            return Err(AppError::BusinessRuleViolation(
+                format!("Invalid status transition from {:?} to {:?}", self.status, new_status)
+            ));
         }
+
+        Ok(())
+    }
+
+    /// Assign responder to disaster
+    pub fn assign_responder(&mut self, responder_id: UserId) -> AppResult<()> {
+        if self.assigned_responders.contains(&responder_id) {
+            return Err(AppError::BusinessRuleViolation(
+                "Responder is already assigned to this disaster".to_string()
+            ));
+        }
+
+        self.assigned_responders.push(responder_id);
+        self.updated_at = Utc::now();
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Remove responder from disaster
+    pub fn remove_responder(&mut self, responder_id: &UserId) -> AppResult<()> {
+        let initial_len = self.assigned_responders.len();
+        self.assigned_responders.retain(|id| id != responder_id);
+        
+        if self.assigned_responders.len() == initial_len {
+            return Err(AppError::NotFound(
+                "Responder not found in assigned responders".to_string()
+            ));
+        }
+
+        self.updated_at = Utc::now();
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Add resource need
+    pub fn add_resource_need(&mut self, resource: ResourceNeed) -> AppResult<()> {
+        self.resources_needed.push(resource);
+        self.updated_at = Utc::now();
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Update estimated damage
+    pub fn update_estimated_damage(&mut self, damage: EstimatedDamage) -> AppResult<()> {
+        self.estimated_damage = Some(damage);
+        self.updated_at = Utc::now();
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Check if disaster is active (not resolved or closed)
+    pub fn is_active(&self) -> bool {
+        !matches!(self.status, DisasterStatus::Resolved | DisasterStatus::Closed)
+    }
+
+    /// Check if disaster requires immediate attention
+    pub fn requires_immediate_attention(&self) -> bool {
+        matches!(self.priority, Priority::Critical | Priority::Emergency) ||
+        matches!(self.severity, DisasterSeverity::Severe | DisasterSeverity::Critical)
+    }
+
+    /// Get age of disaster in hours
+    pub fn age_hours(&self) -> f64 {
+        let now = Utc::now();
+        (now - self.timeline.reported_at).num_seconds() as f64 / 3600.0
+    }
+
+    /// Check if disaster response is overdue
+    pub fn is_response_overdue(&self) -> bool {
+        if !matches!(self.status, DisasterStatus::Reported | DisasterStatus::Verified) {
+            return false;
+        }
+
+        let response_threshold_hours = match self.severity {
+            DisasterSeverity::Critical => 0.5, // 30 minutes
+            DisasterSeverity::Severe => 1.0,   // 1 hour
+            DisasterSeverity::Major => 4.0,    // 4 hours
+            DisasterSeverity::Moderate => 12.0, // 12 hours
+            DisasterSeverity::Minor => 24.0,   // 24 hours
+            _ => 0.0,                      
+        };
+
+        self.age_hours() > response_threshold_hours
     }
 }

@@ -13,9 +13,10 @@ use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
+use governor::state::keyed::DefaultKeyedStateStore;
 use tokio::sync::RwLock;
 
-use crate::shared::cache::CacheService;
+use crate::infrastructure::cache::CacheService;
 use crate::shared::error::{AppError, AppResult};
 use crate::shared::types::{UserId, UserRole, constants::*};
 
@@ -173,7 +174,7 @@ pub struct RateLimitInfo {
 
 /// In-memory rate limiter using governor
 pub struct InMemoryRateLimiter {
-    limiters: Arc<RwLock<HashMap<String, Arc<GovernorRateLimiter<String, InMemoryState, DefaultClock>>>>>,
+    limiters: Arc<RwLock<HashMap<String, Arc<GovernorRateLimiter<String, governor::state::keyed::DefaultKeyedStateStore<String>, DefaultClock>>>>>,
     config: RateLimitConfig,
 }
 
@@ -185,7 +186,7 @@ impl InMemoryRateLimiter {
         }
     }
 
-    async fn get_or_create_limiter(&self, key: &str, strategy: &RateLimitStrategy) -> Arc<GovernorRateLimiter<String, InMemoryState, DefaultClock>> {
+    async fn get_or_create_limiter(&self, key: &str, strategy: &RateLimitStrategy) -> Arc<governor::RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>> {
         let limiters = self.limiters.read().await;
 
         if let Some(limiter) = limiters.get(key) {
@@ -226,7 +227,7 @@ impl RateLimiter for InMemoryRateLimiter {
     async fn check_rate_limit(&self, key: &str, strategy: &RateLimitStrategy) -> AppResult<bool> {
         let limiter = self.get_or_create_limiter(key, strategy).await;
 
-        match limiter.check_key(key) {
+        match limiter.check_key(&key.to_string()) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -302,12 +303,12 @@ impl RateLimiter for CacheRateLimiter {
         if current_count == 1 {
             // Set TTL for the key
             let ttl = match strategy {
-                RateLimitStrategy::FixedWindow { window, .. } => window.as_secs() as u32,
-                RateLimitStrategy::SlidingWindow { window, .. } => window.as_secs() as u32,
-                RateLimitStrategy::TokenBucket { refill_interval, .. } => refill_interval.as_secs() as u32,
+                RateLimitStrategy::FixedWindow { window, .. } => window,
+                RateLimitStrategy::SlidingWindow { window, .. } => window,
+                RateLimitStrategy::TokenBucket { refill_interval, .. } => refill_interval,
             };
 
-            self.cache.set(&cache_key, &current_count, Some(ttl)).await?;
+            self.cache.set_string(&cache_key, (&current_count).to_string(), Some(ttl.clone())).await?;
         }
 
         Ok(current_count <= limit as i64)
@@ -319,7 +320,7 @@ impl RateLimiter for CacheRateLimiter {
 
     async fn get_remaining(&self, key: &str) -> AppResult<u32> {
         let cache_key = self.rate_limit_key(key, &self.config.default_strategy);
-        let current_count: i64 = self.cache.get(&cache_key).await?.unwrap_or(0);
+        let current_count: i64 = self.cache.get_string(&cache_key, ).await?.unwrap_or("0".to_string()).parse().unwrap_or(0);
 
         let limit = match &self.config.default_strategy {
             RateLimitStrategy::FixedWindow { requests, .. } => *requests,

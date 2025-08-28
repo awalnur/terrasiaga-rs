@@ -24,8 +24,8 @@ impl WeatherService {
             lat, lng, self.api_key
         );
 
-        let response = self.client.get(&url).send().await?;
-        let data: Value = response.json().await?;
+        let response = self.client.get(&url).send().await.unwrap();
+        let data: Value = response.json().await.unwrap();
 
         Ok(data)
     }
@@ -36,8 +36,8 @@ impl WeatherService {
             lat, lng, self.api_key
         );
 
-        let response = self.client.get(&url).send().await?;
-        let data: Value = response.json().await?;
+        let response = self.client.get(&url).send().await.unwrap();
+        let data: Value = response.json().await.unwrap();
 
         Ok(data)
     }
@@ -48,8 +48,8 @@ impl WeatherService {
             lat, lng, self.api_key
         );
 
-        let response = self.client.get(&url).send().await?;
-        let data: Value = response.json().await?;
+        let response = self.client.get(&url).send().await.unwrap();
+        let data: Value = response.json().await.unwrap();
 
         Ok(data)
     }

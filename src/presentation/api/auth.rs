@@ -1,17 +1,17 @@
 /// Enhanced authentication API endpoints with PASETO support
 /// Provides secure login, registration, and session management
 
-use actix_web::{web, HttpRequest, HttpResponse, Result};
+use actix_web::{web, HttpRequest, HttpResponse, Result, HttpMessage};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use validator::Validate;
 
 use crate::infrastructure::{
     container::AppContainer,
-    security::{PasetoSecurityService, SecureAuthSession},
+    security::{SecureAuthSession},
 };
-use crate::domain::value_objects::{Email, UserRole};
-use crate::shared::AppError;
+use crate::domain::value_objects::{Email, UserRole, UserStatus};
+use crate::domain::ports::services::AuthService;
+use crate::application::use_cases::ValidatedUseCase;
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct LoginRequest {
@@ -96,7 +96,7 @@ pub async fn login(
 
     // Check rate limiting and account lockout
     let email_for_check = &login_req.email;
-    if let Ok(false) = container.paseto_service.is_account_locked(email_for_check, ip_address.as_deref()).await {
+    if let Ok(true) = container.auth_service.is_account_locked(email_for_check, ip_address.as_deref()).await {
         // Account is locked
         return Ok(HttpResponse::TooManyRequests().json(AuthResponse {
             success: false,
@@ -121,7 +121,7 @@ pub async fn login(
         Ok(Some(user)) => user,
         Ok(None) => {
             // Track failed attempt even for non-existent users
-            let _ = container.paseto_service.track_failed_login(&login_req.email, ip_address.as_deref()).await;
+            let _ = container.auth_service.track_failed_login(&login_req.email, ip_address.as_deref()).await;
             return Ok(HttpResponse::Unauthorized().json(AuthResponse {
                 success: false,
                 message: "Invalid credentials".to_string(),
@@ -138,14 +138,14 @@ pub async fn login(
     };
 
     // Verify password
-    let password_valid = match container.paseto_service.verify_password(&login_req.password, user.password_hash()).await {
+    let password_valid = match container.auth_service.verify_password(&login_req.password, user.password_hash()).await {
         Ok(valid) => valid,
         Err(_) => false,
     };
 
     if !password_valid {
         // Track failed attempt
-        let _ = container.paseto_service.track_failed_login(&login_req.email, ip_address.as_deref()).await;
+        let _ = container.auth_service.track_failed_login(&login_req.email, ip_address.as_deref()).await;
         return Ok(HttpResponse::Unauthorized().json(AuthResponse {
             success: false,
             message: "Invalid credentials".to_string(),
@@ -154,7 +154,7 @@ pub async fn login(
     }
 
     // Check if user account is active
-    if user.status() != "active" {
+    if user.status() != &UserStatus::Active {
         return Ok(HttpResponse::Forbidden().json(AuthResponse {
             success: false,
             message: format!("Account is {}", user.status()),
@@ -163,7 +163,7 @@ pub async fn login(
     }
 
     // Clear failed attempts on successful login
-    let _ = container.paseto_service.clear_failed_attempts(&login_req.email).await;
+    let _ = container.auth_service.clear_failed_attempts(&login_req.email).await;
 
     // Create PASETO token
     let token = match container.paseto_service.create_paseto_token(

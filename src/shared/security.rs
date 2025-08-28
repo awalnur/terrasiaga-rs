@@ -73,8 +73,8 @@ pub enum SecurityError {
     HashingFailed(String),
     #[error("Password verification failed: {0}")]
     VerificationFailed(String),
-    #[error("Password too weak: {0}")]
-    WeakPassword(String),
+    #[error("Password too weak score: {score}")]
+    WeakPassword{score:usize},
     #[error("Password too long (max {max} characters)")]
     PasswordTooLong { max: usize },
     #[error("Password too short (min {min} characters)")]
@@ -214,7 +214,7 @@ impl PasswordSecurity {
         let validation = self.validate_password_strength(password);
         if !validation.is_valid {
             return Err(SecurityError::WeakPassword {
-                score: validation.score,
+                score: validation.score as usize,
             });
         }
 
@@ -224,9 +224,7 @@ impl PasswordSecurity {
         // Hash password
         let password_hash = self.argon2
             .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| SecurityError::HashingFailed {
-                message: format!("Argon2 hashing failed: {}", e),
-            })?;
+            .map_err(|e| SecurityError::HashingFailed (format!("Argon2 hashing failed: {}", e)))?;
 
         Ok(password_hash.to_string())
     }
@@ -250,9 +248,7 @@ impl PasswordSecurity {
 
         // Parse stored hash
         let parsed_hash = PasswordHash::new(hash)
-            .map_err(|e| SecurityError::VerificationFailed {
-                message: format!("Invalid hash format: {}", e),
-            })?;
+            .map_err(|e| SecurityError::VerificationFailed (format!("Invalid hash format: {}", e)))?;
 
         // Verify password
         let is_valid = self.argon2

@@ -1,7 +1,6 @@
 /// Shared utilities and common types
 /// This module contains utilities used across the entire application
 
-pub mod database;
 pub mod error;
 pub mod response;
 pub mod security;
@@ -13,11 +12,8 @@ pub mod macros;
 pub mod paseto_auth;
 
 // Enhanced authentication and middleware
-pub mod auth_middleware;
 
 // Cache and performance utilities
-pub mod cache;
-
 // Event handling and messaging
 pub mod events;
 
@@ -35,9 +31,7 @@ pub use security::{
     hash_password, verify_password, validate_password_strength, generate_secure_password
 };
 pub use paseto_auth::{PasetoService, TokenClaims, TokenPair, TokenType};
-pub use auth_middleware::{AuthService, AuthMiddleware};
 pub use response::ApiResponse;
-pub use cache::{CacheService, CacheConfig};
 pub use rate_limiter::{RateLimiter, RateLimitConfig};
 pub use security::{PasswordService, SecurityService};
 
@@ -50,16 +44,16 @@ pub mod security_utils {
     static GLOBAL_SECURITY: OnceLock<PasswordSecurity> = OnceLock::new();
 
     /// Get global password security instance
-    pub fn get_security() -> &'static PasswordSecurity {
-        GLOBAL_SECURITY.get_or_init(|| {
-            PasswordSecurity::new()
-                .with_min_length(8)
-                .with_require_uppercase(true)
-                .with_require_lowercase(true)
-                .with_require_numbers(true)
-                .with_require_special_chars(true)
-        })
-    }
+    // pub fn get_security() -> &'static PasswordSecurity {
+    //     GLOBAL_SECURITY.get_or_init(|| {
+    //         PasswordSecurity::new()
+    //             .with_min_length(8)
+    //             .with_require_uppercase(true)
+    //             .with_require_lowercase(true)
+    //             .with_require_numbers(true)
+    //             .with_require_special_chars(true)
+    //     })
+    // }
 
     /// Initialize security with custom configuration
     pub fn init_security(config: PasswordSecurity) -> Result<(), &'static str> {
@@ -199,7 +193,7 @@ pub mod geo_calculations {
 
 // Time and scheduling utilities
 pub mod time_utils {
-    use chrono::{DateTime, Utc, Duration as ChronoDuration};
+    use chrono::{DateTime, Utc, Duration as ChronoDuration, Timelike};
     use super::types::Duration;
 
     /// Check if timestamp is within business hours
@@ -214,16 +208,16 @@ pub mod time_utils {
     pub fn time_until_business_hours(timestamp: &DateTime<Utc>) -> Duration {
         let hour = timestamp.hour();
         if hour < 9 {
-            Duration::from_hours((9 - hour) as u64)
+            Duration::from_secs(60*60*(9 - hour) as u64)
         } else if hour >= 17 {
-            Duration::from_hours((24 - hour + 9) as u64)
+            Duration::from_secs(60*60*(24 - hour + 9) as u64)
         } else {
-            Duration::from_minutes(0)
+            Duration::from_secs(0)
         }
     }
 
     /// Format duration for human consumption
     pub fn humanize_duration(duration: &Duration) -> String {
-        duration.as_human_readable()
+        duration.as_secs().to_string() + " seconds"
     }
 }

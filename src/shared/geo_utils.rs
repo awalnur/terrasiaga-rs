@@ -1,15 +1,13 @@
 /// Geographic utilities for Terra Siaga disaster management
 /// Provides location calculations, distance measurements, and geographic operations
 
-use std::f64::consts::PI;
-    use geo::{Point, Polygon, LineString, Contains};
+use geo::{Point, Polygon, LineString, Contains, HaversineDistance, BoundingRect};
 use geo_types::Coord;
 use std::collections::HashMap;
 use rstar::{RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
-use async_trait::async_trait;
 
-use crate::shared::error::{AppError, AppResult};
+use crate::shared::error::{AppResult};
 use crate::domain::value_objects::Coordinates;
 use crate::shared::types::{constants::EARTH_RADIUS_KM};
 
@@ -101,6 +99,15 @@ impl RTreeObject for IndexedPoint {
     }
 }
 
+// Enable distance-based queries on RTree by providing distance metric in degrees (approximate)
+impl rstar::PointDistance for IndexedPoint {
+    fn distance_2(&self, point: &[f64; 2]) -> f64 {
+        let dx = self.point.x() - point[0];
+        let dy = self.point.y() - point[1];
+        dx * dx + dy * dy
+    }
+}
+
 impl SpatialIndex {
     pub fn new() -> Self {
         Self {
@@ -135,8 +142,11 @@ impl SpatialIndex {
     ) -> Vec<&PointOfInterest> {
         let center_point = Point::new(center.longitude, center.latitude);
 
+        // Use approximate degree conversion for initial candidate set, then filter precisely by Haversine
+        let deg_radius = radius_km / 111.32; // ~ km per degree at equator
+        let center_arr = [center_point.x(), center_point.y()];
         self.rtree
-            .locate_within_distance(center_point, radius_km / 111.32) // Approximate conversion
+            .locate_within_distance(center_arr, deg_radius)
             .filter_map(|indexed_point| {
                 if matches!(indexed_point.point_type, IndexedPointType::Poi) {
                     self.pois.get(&indexed_point.id)
@@ -144,6 +154,7 @@ impl SpatialIndex {
                     None
                 }
             })
+            .filter(|poi| GeoCalculations::haversine_distance(center, &poi.coordinates) <= radius_km)
             .collect()
     }
 
@@ -154,10 +165,13 @@ impl SpatialIndex {
         limit: usize,
         poi_type: Option<PoiType>,
     ) -> Vec<&PointOfInterest> {
+        if limit == 0 { return Vec::new(); }
         let center_point = Point::new(center.longitude, center.latitude);
+        let center_arr = [center_point.x(), center_point.y()];
 
-        self.rtree
-            .nearest_neighbor_iter(&center_point)
+        let mut candidates: Vec<&PointOfInterest> = self
+            .rtree
+            .nearest_neighbor_iter(&center_arr)
             .filter_map(|indexed_point| {
                 if matches!(indexed_point.point_type, IndexedPointType::Poi) {
                     self.pois.get(&indexed_point.id)
@@ -172,8 +186,16 @@ impl SpatialIndex {
                     true
                 }
             })
-            .take(limit)
-            .collect()
+            .collect();
+
+        // Sort by geodesic distance to ensure correctness
+        candidates.sort_by(|a, b| {
+            let da = GeoCalculations::haversine_distance(center, &a.coordinates);
+            let db = GeoCalculations::haversine_distance(center, &b.coordinates);
+            da.partial_cmp(&db).unwrap()
+        });
+
+        candidates.into_iter().take(limit).collect()
     }
 
     /// Check if a point is within any administrative region
@@ -298,13 +320,14 @@ impl GeoCalculations {
         // This is an approximation - for accurate area calculation,
         // you'd want to project to an appropriate coordinate system
         let bbox = polygon.bounding_rect().unwrap();
+        // Correct lat/lon (y/x) ordering when constructing Coordinates
         let width = Self::haversine_distance(
-            &Coordinates::new(bbox.min().x, bbox.min().y).unwrap(),
-            &Coordinates::new(bbox.max().x, bbox.min().y).unwrap(),
+            &Coordinates::new(bbox.min().y, bbox.min().x).unwrap(),
+            &Coordinates::new(bbox.max().y, bbox.min().x).unwrap(),
         );
         let height = Self::haversine_distance(
-            &Coordinates::new(bbox.min().x, bbox.min().y).unwrap(),
-            &Coordinates::new(bbox.min().x, bbox.max().y).unwrap(),
+            &Coordinates::new(bbox.min().y, bbox.min().x).unwrap(),
+            &Coordinates::new(bbox.min().y, bbox.max().x).unwrap(),
         );
 
         width * height // Rough approximation
@@ -534,7 +557,7 @@ pub struct MockGeocodingService;
 impl GeocodingService for MockGeocodingService {
     async fn geocode_address(&self, _address: &str) -> AppResult<Vec<Coordinates>> {
         // Return Jakarta coordinates as default
-        Ok(vec![Coordinates::new(-6.2088, 106.8456)?])
+        Ok(vec![Coordinates::new(-6.2088, 106.8456).unwrap()])
     }
 
     async fn reverse_geocode(&self, coordinates: &Coordinates) -> AppResult<LocationInfo> {

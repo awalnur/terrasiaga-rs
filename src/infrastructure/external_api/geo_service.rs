@@ -25,8 +25,8 @@ impl GeoService {
             self.api_key
         );
 
-        let response = self.client.get(&url).send().await?;
-        let data: Value = response.json().await?;
+        let response = self.client.get(&url).send().await.unwrap();
+        let data: Value = response.json().await.unwrap();
 
         if let Some(results) = data["results"].as_array() {
             if let Some(first_result) = results.first() {
@@ -50,8 +50,8 @@ impl GeoService {
             lat, lng, self.api_key
         );
 
-        let response = self.client.get(&url).send().await?;
-        let data: Value = response.json().await?;
+        let response = self.client.get(&url).send().await.unwrap();
+        let data: Value = response.json().await.unwrap();
 
         if let Some(results) = data["results"].as_array() {
             if let Some(first_result) = results.first() {

@@ -330,7 +330,6 @@ mod integration_tests {
     #[test]
     fn test_error_propagation() {
         // Test error propagation through infrastructure layers
-
         #[derive(Debug)]
         enum InfraError {
             Database(String),

@@ -102,6 +102,7 @@ impl Location {
                 updated_at: now,
                 created_by: None,
                 updated_by: None,
+                version: 0,
             },
         })
     }

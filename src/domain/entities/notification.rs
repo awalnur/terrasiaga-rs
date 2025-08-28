@@ -136,10 +136,12 @@ impl Notification {
                 delivery_attempts: Vec::new(),
             },
             audit: AuditFields {
+
                 created_at: now,
                 updated_at: now,
                 created_by: None,
                 updated_by: None,
+                version: 0,
             },
         })
     }

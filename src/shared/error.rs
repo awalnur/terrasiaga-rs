@@ -3,6 +3,7 @@
 
 use actix_web::{HttpResponse, ResponseError};
 use diesel::result::Error as DieselError;
+use r2d2::Error as R2D2Error;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
@@ -14,11 +15,31 @@ use chrono::{DateTime, Utc};
 pub type AppResult<T> = Result<T, AppError>;
 pub type DomainResult<T> = Result<T, DomainError>;
 
+#[derive(Debug, Error)]
+pub enum DatabaseError{
+    #[error("Diesel error: {0}")]
+    Diesel(#[from] DieselError),
+
+    #[error("Connection pool error: {0}")]
+    ConnectionPool(#[from] R2D2Error),
+
+    #[error("Database error: {0}")]
+    Other(String),
+}
+
+// Allow direct conversion from underlying database errors to AppError
+impl From<DieselError> for AppError {
+    fn from(e: DieselError) -> Self { AppError::Database(DatabaseError::Diesel(e)) }
+}
+impl From<R2D2Error> for AppError {
+    fn from(e: R2D2Error) -> Self { AppError::Database(DatabaseError::ConnectionPool(e)) }
+}
+
 /// Enhanced application error with context and tracing
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Database error: {0}")]
-    Database(#[from] DieselError),
+    Database(#[from] DatabaseError),
     
     #[error("Validation error: {0}")]
     Validation(String),
@@ -28,6 +49,9 @@ pub enum AppError {
     
     #[error("Authorization error: {0}")]
     Authorization(String),
+    
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
     
     #[error("Not found: {0}")]
     NotFound(String),
@@ -222,7 +246,7 @@ impl Default for ErrorContext {
 }
 
 /// Enhanced error with context
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ContextualError {
     pub error: AppError,
     pub context: ErrorContext,
@@ -359,6 +383,7 @@ impl AppError {
             AppError::DataConsistency(_) => "DATA_CONSISTENCY_ERROR",
             AppError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
             AppError::Multiple(_) => "MULTIPLE_ERRORS",
+            AppError::Forbidden(_) => "FORBIDDEN",
         }
     }
 
@@ -583,7 +608,7 @@ mod tests {
     #[test]
     fn test_error_severity_classification() {
         assert_eq!(AppError::Validation("test".to_string()).severity(), ErrorSeverity::Low);
-        assert_eq!(AppError::Database(DieselError::NotFound).severity(), ErrorSeverity::High);
+        assert_eq!(AppError::Database(DatabaseError::Diesel(DieselError::NotFound)).severity(), ErrorSeverity::High);
         assert_eq!(AppError::EmergencyProtocol("test".to_string()).severity(), ErrorSeverity::Critical);
     }
 

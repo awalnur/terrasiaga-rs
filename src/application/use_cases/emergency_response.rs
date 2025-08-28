@@ -7,9 +7,12 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::application::use_cases::{UseCase, ValidatedUseCase};
+use crate::domain::entities::disaster::DisasterSeverity;
+use crate::shared::types::Coordinates as SCoordinates;
+use crate::shared::Permission;
 use crate::domain::value_objects::*;
 use crate::domain::ports::repositories::{DisasterRepository, UserRepository};
-use crate::domain::ports::services::{NotificationService, GeoService};
+use crate::domain::ports::services::{NotificationService, GeolocationService};
 use crate::domain::events::{EmergencyResponseDispatchedEvent, EventPublisher};
 use crate::shared::{AppResult, AppError};
 
@@ -43,7 +46,7 @@ pub struct DispatchEmergencyResponseUseCase {
     disaster_repository: Arc<dyn DisasterRepository>,
     user_repository: Arc<dyn UserRepository>,
     notification_service: Arc<dyn NotificationService>,
-    geo_service: Arc<dyn GeoService>,
+    geo_service: Arc<dyn GeolocationService>,
     event_publisher: Arc<dyn EventPublisher>,
 }
 
@@ -52,7 +55,7 @@ impl DispatchEmergencyResponseUseCase {
         disaster_repository: Arc<dyn DisasterRepository>,
         user_repository: Arc<dyn UserRepository>,
         notification_service: Arc<dyn NotificationService>,
-        geo_service: Arc<dyn GeoService>,
+        geo_service: Arc<dyn GeolocationService>,
         event_publisher: Arc<dyn EventPublisher>,
     ) -> Self {
         Self {
@@ -67,12 +70,12 @@ impl DispatchEmergencyResponseUseCase {
     /// Calculate estimated arrival time based on distance and traffic
     async fn calculate_arrival_time(
         &self,
-        from_location: &Coordinates,
-        to_location: &Coordinates,
+        from_location: &SCoordinates,
+        to_location: &SCoordinates,
         team_type: &str,
     ) -> AppResult<DateTime<Utc>> {
-        let distance = from_location.distance_to(to_location);
-        
+        let distance_km = from_location.distance_to(to_location);
+
         // Base speed in km/h based on team type
         let base_speed = match team_type {
             "medical" => 80.0, // Ambulance with emergency lights
@@ -84,9 +87,10 @@ impl DispatchEmergencyResponseUseCase {
 
         // Add traffic factor (simplified - in real implementation use traffic API)
         let traffic_factor = 1.3; // 30% slower due to traffic
-        let effective_speed = base_speed / traffic_factor;
-        
-        let travel_time_hours = distance / 1000.0 / effective_speed;
+        let effective_speed = base_speed / traffic_factor; // km/h
+
+        // distance_km is already in kilometers
+        let travel_time_hours = distance_km / effective_speed;
         let travel_time_minutes = (travel_time_hours * 60.0) as i64;
         
         // Add preparation time (getting ready, equipment check)
@@ -103,10 +107,10 @@ impl DispatchEmergencyResponseUseCase {
     }
 
     /// Find nearest available emergency station
-    async fn find_nearest_station(&self, location: &Coordinates, team_type: &str) -> AppResult<Coordinates> {
+    async fn find_nearest_station(&self, _location: &SCoordinates, _team_type: &str) -> AppResult<SCoordinates> {
         // This would query a database of emergency stations
         // For now, returning a mock coordinate for Jakarta Emergency Center
-        Ok(Coordinates::new(-6.2088, 106.8456)?) // Mock Jakarta coordinate
+        SCoordinates::new(-6.2088, 106.8456).map_err(|e| AppError::Validation(e.to_string()))
     }
 
     /// Allocate resources based on disaster severity and type
@@ -121,7 +125,7 @@ impl DispatchEmergencyResponseUseCase {
                     "Stretcher".to_string(),
                 ]);
                 
-                if matches!(disaster_severity, DisasterSeverity::High | DisasterSeverity::Critical) {
+                if matches!(disaster_severity, DisasterSeverity::Severe | DisasterSeverity::Critical) {
                     equipment.extend_from_slice(&[
                         "Advanced Life Support".to_string(),
                         "Trauma Kit".to_string(),
@@ -153,7 +157,7 @@ impl DispatchEmergencyResponseUseCase {
                     "First Aid Kit".to_string(),
                 ]);
 
-                if matches!(disaster_severity, DisasterSeverity::High | DisasterSeverity::Critical) {
+                if matches!(disaster_severity, DisasterSeverity::Severe | DisasterSeverity::Critical) {
                     equipment.extend_from_slice(&[
                         "Heavy Lifting Equipment".to_string(),
                         "Cutting Tools".to_string(),
@@ -199,13 +203,14 @@ impl ValidatedUseCase<DispatchEmergencyResponseRequest, EmergencyResponseDispatc
             .await?
             .ok_or_else(|| AppError::NotFound("Dispatcher not found".to_string()))?;
 
-        if !dispatcher.role().can_perform("dispatch_emergency_response") {
+        if !dispatcher.role().has_permission(&Permission::ManageEmergencyResponse) {
             return Err(AppError::Forbidden("Insufficient permissions to dispatch emergency response".to_string()));
         }
 
-        // Validate team type
+        // Validate team type (case-insensitive, trim spaces)
         let valid_team_types = ["medical", "fire", "rescue", "police", "search_and_rescue"];
-        if !valid_team_types.contains(&request.response_team_type.as_str()) {
+        let team_type_norm = request.response_team_type.trim().to_lowercase();
+        if !valid_team_types.contains(&team_type_norm.as_str()) {
             return Err(AppError::Validation(format!(
                 "Invalid team type. Must be one of: {}",
                 valid_team_types.join(", ")
@@ -230,43 +235,51 @@ impl ValidatedUseCase<DispatchEmergencyResponseRequest, EmergencyResponseDispatc
 impl UseCase<DispatchEmergencyResponseRequest, EmergencyResponseDispatchResponse> for DispatchEmergencyResponseUseCase {
     async fn execute(&self, request: DispatchEmergencyResponseRequest) -> AppResult<EmergencyResponseDispatchResponse> {
         // Get disaster details
-        let disaster = self.disaster_repository
+        let mut disaster = self.disaster_repository
             .find_by_id(&request.disaster_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Disaster not found".to_string()))?;
 
-        // Find nearest emergency station
-        let station_location = self.find_nearest_station(disaster.location(), &request.response_team_type).await?;
+        // Normalize team type and map aliases
+        let mut team_type_norm = request.response_team_type.trim().to_lowercase();
+        if team_type_norm == "search_and_rescue" { team_type_norm = "rescue".to_string(); }
 
-        // Calculate estimated arrival time
-        let estimated_arrival = self.calculate_arrival_time(
-            &station_location,
-            disaster.location(),
-            &request.response_team_type,
-        ).await?;
+        // Find nearest station and estimate arrival
+        // Convert disaster location to shared Coordinates
+        let disaster_loc = {
+            let loc = disaster.location();
+            SCoordinates { latitude: loc.latitude, longitude: loc.longitude, altitude: loc.altitude }
+        };
+        let station_coords = self.find_nearest_station(&disaster_loc, &team_type_norm).await?;
+        let estimated_arrival = self
+            .calculate_arrival_time(&station_coords, &disaster_loc, &team_type_norm)
+            .await?;
+
+        // Resolve a human-readable station name (best-effort)
+        let assigned_station_name = match self.geo_service.reverse_geocode(&station_coords).await {
+            Ok(name) => Some(name),
+            Err(_) => None,
+        };
 
         // Allocate resources
-        let equipment_allocated = self.allocate_resources(
-            disaster.severity(),
-            &request.response_team_type,
-            &request.special_equipment_needed,
-        );
+        let resources = self.allocate_resources(disaster.severity(), &team_type_norm, &request.special_equipment_needed);
 
-        // Generate response ID
+        // Update disaster status to Responded if currently Reported/Verified
+        use crate::domain::entities::disaster::DisasterStatus;
+        if matches!(disaster.status(), DisasterStatus::Reported | DisasterStatus::Verified) {
+            // Ignore status update failure quietly only if invalid transition; otherwise bubble up
+            if let Err(e) = disaster.update_status(DisasterStatus::Responded, request.dispatched_by.clone()) {
+                // Only allow no-op if already responded/resolved/closed; else return error
+                if !matches!(disaster.status(), DisasterStatus::Responded | DisasterStatus::Resolved | DisasterStatus::Closed) {
+                    return Err(e);
+                }
+            }
+            let _ = self.disaster_repository.update(&disaster).await?;
+        }
+
+        // Create response payload
         let response_id = Uuid::new_v4();
-        let dispatched_at = Utc::now();
-
-        // Create response record (in real implementation, save to database)
-        let response = EmergencyResponseDispatchResponse {
-            response_id,
-            disaster_id: request.disaster_id.clone(),
-            team_type: request.response_team_type.clone(),
-            estimated_arrival,
-            personnel_count: request.estimated_personnel_needed,
-            equipment_allocated: equipment_allocated.clone(),
-            status: "dispatched".to_string(),
-            dispatched_at,
-        };
+        let personnel = request.estimated_personnel_needed;
 
         // Publish domain event
         let event = EmergencyResponseDispatchedEvent {
@@ -275,48 +288,33 @@ impl UseCase<DispatchEmergencyResponseRequest, EmergencyResponseDispatchResponse
             response_team_id: response_id,
             dispatched_by: request.dispatched_by.clone(),
             estimated_arrival,
-            resources_allocated: equipment_allocated,
-            occurred_at: dispatched_at,
-            version: 1,
+            resources_allocated: resources.clone(),
+            occurred_at: Utc::now(),
+            version: disaster.version() as u64,
         };
-
         self.event_publisher.publish(&event).await?;
 
-        // Send notifications to relevant parties
-        self.notification_service
-            .notify_emergency_dispatch(&disaster, &response)
-            .await?;
+        // Send notifications (best-effort)
+        let notify_payload = crate::domain::ports::services::EmergencyResponse {
+            id: crate::shared::types::EmergencyResponseId::new(),
+            disaster_id: request.disaster_id.clone(),
+            response_team_type: team_type_norm.clone(),
+            assigned_station: assigned_station_name.clone(),
+            estimated_arrival: Some(estimated_arrival),
+            status: "Dispatched".to_string(),
+            resources_deployed: resources.clone(),
+        };
+        let _ = self.notification_service.notify_emergency_dispatch(&disaster, &notify_payload).await;
 
-        Ok(response)
-    }
-}
-
-/// Request to get active emergency responses
-#[derive(Debug, Clone)]
-pub struct GetActiveResponsesRequest {
-    pub disaster_id: Option<DisasterId>,
-    pub team_type: Option<String>,
-    pub status_filter: Option<Vec<String>>,
-    pub radius_km: Option<f64>,
-    pub center_location: Option<Coordinates>,
-}
-
-/// Use case for getting active emergency responses
-pub struct GetActiveResponsesUseCase {
-    // Implementation would query response database
-}
-
-impl GetActiveResponsesUseCase {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-#[async_trait]
-impl UseCase<GetActiveResponsesRequest, Vec<EmergencyResponseDispatchResponse>> for GetActiveResponsesUseCase {
-    async fn execute(&self, _request: GetActiveResponsesRequest) -> AppResult<Vec<EmergencyResponseDispatchResponse>> {
-        // In real implementation, this would query the emergency response database
-        // For now, returning empty vector
-        Ok(vec![])
+        Ok(EmergencyResponseDispatchResponse {
+            response_id,
+            disaster_id: request.disaster_id,
+            team_type: team_type_norm,
+            estimated_arrival,
+            personnel_count: personnel,
+            equipment_allocated: resources,
+            status: "Dispatched".to_string(),
+            dispatched_at: Utc::now(),
+        })
     }
 }
