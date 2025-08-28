@@ -3,15 +3,13 @@
 
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use validator::Validate;
 use crate::application::ValidatedUseCase;
 use crate::infrastructure::{
     container::AppContainer,
-    security::{PasetoSecurityService, SecureAuthSession},
+    security::{SecureAuthSession},
 };
 use crate::domain::value_objects::{Email, UserRole as DomainUserRole};
-use crate::shared::AppError;
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct LoginRequest {
@@ -95,8 +93,10 @@ pub async fn login(
     login_req: web::Json<LoginRequest>,
     container: web::Data<AppContainer>,
 ) -> Result<HttpResponse> {
+
     // Validate request
     if let Err(validation_errors) = login_req.validate() {
+        println!("{:?}", validation_errors);
         return Ok(HttpResponse::BadRequest().json(AuthResponse {
             success: false,
             message: format!("Validation failed: {:?}", validation_errors),

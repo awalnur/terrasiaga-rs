@@ -1,7 +1,7 @@
 /// Main application entry point
 /// Sets up the complete application with Clean Architecture and dependency injection
 
-use actix_web::{middleware, web, App, HttpServer};
+use actix_web::{middleware, web, App, HttpServer, ResponseError};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -18,6 +18,8 @@ use terra_siaga::infrastructure::HealthService;
 use terra_siaga::infrastructure::monitoring::{DatabaseHealthChecker, CacheHealthChecker};
 use terra_siaga::infrastructure::database::DbPool;
 use terra_siaga::middleware::ErrorHandler;
+// Add imports for JSON error handling
+use actix_web::error::JsonPayloadError;
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -116,6 +118,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .app_data(app_data.clone())
             .app_data(paseto_data.clone())
             .app_data(health_data.clone())
+            // Configure JSON extractor to return consistent JSON errors
+            .app_data(
+                web::JsonConfig::default()
+                    .limit(1 << 20) // 1 MiB
+                    .error_handler(|err, _req| {
+                        // Map JSON payload errors to our AppError with 400 status
+                        let message = match &err {
+                            JsonPayloadError::Deserialize(e) => format!("Invalid JSON payload: {}", e),
+                            JsonPayloadError::ContentType => "Unsupported Content-Type. Expecting application/json".to_string(),
+                            JsonPayloadError::OverflowKnownLength { .. } | JsonPayloadError::Overflow { .. } =>
+                                "JSON payload too large".to_string(),
+                            _ => err.to_string(),
+                        };
+                        let app_err = terra_siaga::shared::error::AppError::BadRequest(message);
+                        actix_web::error::InternalError::from_response(err, app_err.error_response()).into()
+                    })
+            )
 
             // Global middleware stack (order matters!)
             .wrap(middleware::Logger::new(
