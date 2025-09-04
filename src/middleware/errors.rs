@@ -63,16 +63,13 @@ where
                         }
 
                         let error_response = match status.as_u16() {
-                            401 => HttpResponse::Unauthorized().json(json!({
-                                "error": "Unauthorized",
-                                "message": "Authentication required",
-                                "status": 401
-                            })),
+                            401 => AppError::Unauthorized("Unauthorized".to_string()).error_response(),
                             403 => HttpResponse::Forbidden().json(json!({
                                 "error": "Forbidden",
                                 "message": "Access denied",
                                 "status": 403
                             })),
+
                             404 => AppError::NotFound("Resource Not Found".to_string()).error_response(),
                             500 => {
                                 error!("Internal server error occurred");

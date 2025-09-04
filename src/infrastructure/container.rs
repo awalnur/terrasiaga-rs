@@ -263,6 +263,14 @@ impl AppContainer {
                     .unwrap_or(8),
                 elevated_session_minutes: 15,
                 use_local_tokens: true, // Use encrypted tokens in production
+                access_token_ttl_minutes: env::var("ACCESS_TOKEN_TTL_MINUTES")
+                    .unwrap_or_else(|_| "15".to_string())
+                    .parse()
+                    .unwrap_or(15),
+                refresh_token_ttl_days: env::var("REFRESH_TOKEN_TTL_DAYS")
+                    .unwrap_or_else(|_| "7".to_string())
+                    .parse()
+                    .unwrap_or(7),
             }
         } else {
             PasetoConfig::default()

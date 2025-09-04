@@ -8,10 +8,6 @@ pub mod types;
 pub mod validation;
 pub mod macros;
 
-// Replace JWT with PASETO
-pub mod paseto_auth;
-
-// Enhanced authentication and middleware
 
 // Cache and performance utilities
 // Event handling and messaging
@@ -30,7 +26,6 @@ pub use security::{
     PasswordSecurity, SecurityConfig, PasswordStrength, SecurityError,
     hash_password, verify_password, validate_password_strength, generate_secure_password
 };
-pub use paseto_auth::{PasetoService, TokenClaims, TokenPair, TokenType};
 pub use response::ApiResponse;
 pub use rate_limiter::{RateLimiter, RateLimitConfig};
 pub use security::{PasswordService, SecurityService};

@@ -12,9 +12,8 @@ use terra_siaga::{
     infrastructure::AppContainer,
     presentation::api,
     middleware::{cors, errors as error_middleware},
-    shared::paseto_auth::PasetoService,
 };
-use terra_siaga::infrastructure::HealthService;
+use terra_siaga::infrastructure::{HealthService, PasetoSecurityService};
 use terra_siaga::infrastructure::monitoring::{DatabaseHealthChecker, CacheHealthChecker};
 use terra_siaga::infrastructure::database::DbPool;
 use terra_siaga::middleware::ErrorHandler;
@@ -47,14 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🌍 Environment: {}", config.environment());
     info!("🖥️  Server: {}:{}", config.server.host, config.server.port);
 
-    // Initialize PASETO authentication service
-    let paseto_key = config.auth.jwt_secret.as_bytes();
-    let paseto_service = Arc::new(PasetoService::new(paseto_key).map_err(|e| {
-        error!("❌ Failed to initialize PASETO service: {}", e);
-        e
-    })?);
-
-    info!("🔐 PASETO authentication service initialized");
 
     // Build application container with all dependencies
     let container = AppContainer::build(&config).await.map_err(|e| {
@@ -93,7 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Prepare shared app data
     let app_data = web::Data::new(container);
-    let paseto_data = web::Data::new(paseto_service);
     let health_data = web::Data::new(Arc::new(health_service));
 
     // Extract CORS origins to avoid lifetime issues (not required by current CORS config)
@@ -116,7 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         App::new()
             // Inject dependencies
             .app_data(app_data.clone())
-            .app_data(paseto_data.clone())
             .app_data(health_data.clone())
             // Configure JSON extractor to return consistent JSON errors
             .app_data(
@@ -132,7 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => err.to_string(),
                         };
                         let app_err = terra_siaga::shared::error::AppError::BadRequest(message);
-                        actix_web::error::InternalError::from_response(err, app_err.error_response()).into()
+                        app_err.into()
+                        // actix_web::error::InternalError::from_response(err, app_err.error_response()).into()
                     })
             )
 

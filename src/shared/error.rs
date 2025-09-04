@@ -59,7 +59,7 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
     
-    #[error("Bad request: {0}")]
+    #[error("{0}")]
     BadRequest(String),
     
     #[error("Internal server error: {0}")]

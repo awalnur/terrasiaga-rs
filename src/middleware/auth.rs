@@ -11,7 +11,7 @@ use std::future::{ready, Ready};
 use std::sync::Arc;
 use std::rc::Rc;
 use tracing::{error, warn, debug};
-use crate::shared::paseto_auth::{PasetoService, TokenClaims, TokenType};
+use crate::infrastructure::PasetoSecurityService;
 use crate::shared::types::{UserRole, UserId};
 use crate::shared::error::AppError;
 
@@ -52,7 +52,6 @@ impl AuthSession {
 pub struct AuthMiddleware {
     required_role: Option<UserRole>,
     required_permissions: Option<Vec<String>>,
-    token_type: TokenType,
 }
 
 impl AuthMiddleware {
@@ -60,7 +59,6 @@ impl AuthMiddleware {
         Self {
             required_role: None,
             required_permissions: None,
-            token_type: TokenType::Access,
         }
     }
 
@@ -68,7 +66,6 @@ impl AuthMiddleware {
         Self {
             required_role: Some(role),
             required_permissions: None,
-            token_type: TokenType::Access,
         }
     }
 
@@ -76,13 +73,7 @@ impl AuthMiddleware {
         Self {
             required_role: None,
             required_permissions: Some(permissions),
-            token_type: TokenType::Access,
         }
-    }
-
-    pub fn with_token_type(mut self, token_type: TokenType) -> Self {
-        self.token_type = token_type;
-        self
     }
 }
 
@@ -103,7 +94,6 @@ where
             service: Rc::new(service),
             required_role: self.required_role.clone(),
             required_permissions: self.required_permissions.clone(),
-            token_type: self.token_type.clone(),
         }))
     }
 }
@@ -112,7 +102,6 @@ pub struct AuthMiddlewareService<S> {
     service: Rc<S>,
     required_role: Option<UserRole>,
     required_permissions: Option<Vec<String>>,
-    token_type: TokenType,
 }
 
 impl<S, B> Service<ServiceRequest> for AuthMiddlewareService<S>
@@ -131,11 +120,10 @@ where
         let service = Rc::clone(&self.service);
         let required_role = self.required_role.clone();
         let required_permissions = self.required_permissions.clone();
-        let token_type = self.token_type.clone();
 
         Box::pin(async move {
             // Get PASETO service from app data
-            let paseto = match req.app_data::<web::Data<Arc<PasetoService>>>() {
+            let paseto = match req.app_data::<web::Data<Arc<PasetoSecurityService>>>() {
                 Some(service) => service.get_ref().clone(),
                 None => {
                     error!("PASETO service not found in app data");
@@ -149,105 +137,79 @@ where
             };
 
             // Extract authorization header
-            let auth_header = req.headers().get("Authorization");
+            let token_opt = req.headers().get("Authorization").and_then(|hv| hv.to_str().ok()).and_then(|s| {
+                if s.starts_with("Bearer ") { Some(s[7..].to_string()) } else { None }
+            });
 
-            if let Some(header_value) = auth_header {
-                if let Ok(header_str) = header_value.to_str() {
-                    if header_str.starts_with("Bearer ") {
-                        let token = &header_str[7..];
-
-                        match paseto.verify_token(token) {
-                            Ok(claims) => {
-                                // Check token type
-                                if claims.token_type != token_type {
-                                    let resp = HttpResponse::Unauthorized()
-                                        .json(serde_json::json!({
-                                            "error": "Invalid token type",
-                                            "message": "Access token required"
-                                        }))
-                                        .map_into_right_body();
-                                    return Ok(req.into_response(resp));
-                                }
-
-                                // Resolve user id from token
-                                let user_id = match paseto.extract_user_id(token) {
-                                    Ok(id) => id,
-                                    Err(e) => {
-                                        warn!("Failed to extract user id: {}", e);
-                                        let resp = HttpResponse::Unauthorized()
-                                            .json(serde_json::json!({
-                                                "error": "Invalid token",
-                                                "message": e.to_string()
-                                            }))
-                                            .map_into_right_body();
-                                        return Ok(req.into_response(resp));
-                                    }
-                                };
-
-                                // Create auth session
-                                let session = AuthSession {
-                                    user_id,
-                                    role: claims.role,
-                                    permissions: claims.permissions,
-                                    session_id: claims.session_id,
-                                    device_fingerprint: claims.device_fingerprint,
-                                    ip_address: req.connection_info().realip_remote_addr().map(String::from),
-                                };
-
-                                // Check role requirements
-                                if let Some(min_role) = &required_role {
-                                    if !session.has_minimum_role(min_role) {
-                                        let resp = HttpResponse::Forbidden()
-                                            .json(serde_json::json!({
-                                                "error": "Insufficient permissions",
-                                                "message": "Higher role required"
-                                            }))
-                                            .map_into_right_body();
-                                        return Ok(req.into_response(resp));
-                                    }
-                                }
-
-                                // Check permission requirements
-                                if let Some(required_permissions) = &required_permissions {
-                                    let required_refs: Vec<String> = required_permissions.clone();
-                                    if !session.has_all_permissions(&required_refs) {
-                                        let resp = HttpResponse::Forbidden()
-                                            .json(serde_json::json!({
-                                                "error": "Insufficient permissions",
-                                                "message": "Required permissions not granted",
-                                                "required": required_permissions
-                                            }))
-                                            .map_into_right_body();
-                                        return Ok(req.into_response(resp));
-                                    }
-                                }
-
-                                // Insert auth session into request extensions
-                                req.extensions_mut().insert(session);
-                            }
-                            Err(e) => {
-                                warn!("Token validation failed: {}", e);
-                                let resp = HttpResponse::Unauthorized()
-                                    .json(serde_json::json!({
-                                        "error": "Invalid or expired token",
-                                        "message": e.to_string()
-                                    }))
-                                    .map_into_right_body();
-                                return Ok(req.into_response(resp));
-                            }
-                        }
-                    }
+            let token = match token_opt {
+                Some(t) if !t.is_empty() => t,
+                _ => {
+                    let resp = HttpResponse::Unauthorized()
+                        .json(serde_json::json!({
+                            "error": "Authentication required",
+                            "message": "Valid Bearer token is required"
+                        }))
+                        .map_into_right_body();
+                    return Ok(req.into_response(resp));
                 }
-            } else {
-                // No authorization header
-                let resp = HttpResponse::Unauthorized()
-                    .json(serde_json::json!({
-                        "error": "Authentication required",
-                        "message": "Valid authentication token required"
-                    }))
-                    .map_into_right_body();
-                return Ok(req.into_response(resp));
+            };
+
+            // Validate access token
+            let session_res = paseto.validate_paseto_token(&token).await;
+            let session = match session_res {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Token validation failed: {:?}", e);
+                    let mut status = match e {
+                        AppError::Unauthorized(_) => HttpResponse::Unauthorized(),
+                        _ => HttpResponse::InternalServerError(),
+                    };
+                    let resp = status
+                        .json(serde_json::json!({
+                            "error": "Invalid or expired token"
+                        }))
+                        .map_into_right_body();
+                    return Ok(req.into_response(resp));
+                }
+            };
+
+            // Build AuthSession
+            let auth_session = AuthSession {
+                user_id: session.user_id.clone(),
+                role: session.role.clone(),
+                permissions: session.permissions.clone(),
+                session_id: session.session_id.clone(),
+                device_fingerprint: session.device_fingerprint.clone(),
+                ip_address: session.ip_address.clone(),
+            };
+
+            // Enforce role and permission requirements if configured
+            if let Some(ref min_role) = required_role {
+                if !auth_session.has_minimum_role(min_role) {
+                    let resp = HttpResponse::Forbidden()
+                        .json(serde_json::json!({
+                            "error": "Insufficient role",
+                            "required_role": format!("{:?}", min_role)
+                        }))
+                        .map_into_right_body();
+                    return Ok(req.into_response(resp));
+                }
             }
+
+            if let Some(ref perms) = required_permissions {
+                if !auth_session.has_all_permissions(perms) {
+                    let resp = HttpResponse::Forbidden()
+                        .json(serde_json::json!({
+                            "error": "Missing required permissions",
+                            "required_permissions": perms
+                        }))
+                        .map_into_right_body();
+                    return Ok(req.into_response(resp));
+                }
+            }
+
+            // Attach session to request extensions for handlers to use
+            req.extensions_mut().insert(auth_session);
 
             let res = service.call(req).await?;
             Ok(res.map_into_left_body())

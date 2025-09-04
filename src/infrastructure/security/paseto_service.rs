@@ -30,6 +30,8 @@ pub struct PasetoTokenClaims {
     pub iss: String,        // Issuer
     pub jti: String,        // JWT ID (unique token identifier)
     pub scope: Vec<String>, // Token scopes/permissions
+    // Added token_type for distinguishing access vs refresh (None => legacy access)
+    pub token_type: Option<String>,
 }
 
 /// Enhanced authentication session with more security features
@@ -39,7 +41,7 @@ pub struct SecureAuthSession {
     pub email: Email,
     pub role: UserRole,
     pub session_id: String,
-    pub token_id: String,        // Unique token identifier
+    pub token_id: String,        // Unique token identifier (access token id)
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
@@ -49,6 +51,9 @@ pub struct SecureAuthSession {
     pub permissions: Vec<String>,
     pub is_elevated: bool,       // For sensitive operations
     pub mfa_verified: bool,      // Multi-factor authentication status
+    // Refresh token support
+    pub refresh_token_id: Option<String>,
+    pub refresh_expires_at: Option<DateTime<Utc>>,    
 }
 
 /// PASETO configuration
@@ -61,6 +66,9 @@ pub struct PasetoConfig {
     pub session_timeout_hours: u64,
     pub elevated_session_minutes: u64,
     pub use_local_tokens: bool,   // Use encrypted tokens vs signed tokens
+    // New fine-grained TTLs (access/refresh)
+    pub access_token_ttl_minutes: u64,
+    pub refresh_token_ttl_days: u64,
 }
 
 impl Default for PasetoConfig {
@@ -77,6 +85,9 @@ impl Default for PasetoConfig {
             session_timeout_hours: 72,
             elevated_session_minutes: 15,
             use_local_tokens: true, // Default to encrypted tokens for better security
+            // Defaults following common practices: short access, longer refresh
+            access_token_ttl_minutes: 15,
+            refresh_token_ttl_days: 7,
         }
     }
 }
@@ -88,6 +99,16 @@ impl PasetoConfig {
         let public_key: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
         (public_key, private_key)
     }
+}
+
+/// Pair of access and refresh tokens
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthTokenPair {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub session_id: String,
+    pub access_expires_at: DateTime<Utc>,
+    pub refresh_expires_at: DateTime<Utc>,
 }
 
 /// Enhanced PASETO security service
@@ -172,7 +193,49 @@ impl PasetoSecurityService {
         }
     }
 
-    /// Create PASETO token for user
+    /// Helper: sign or encrypt claims JSON to PASETO token based on config
+    fn encode_claims(&self, claims_json: &str) -> AppResult<String> {
+        let paseto_claims = Claims::from_bytes(claims_json.as_bytes())
+            .map_err(|e| AppError::InternalServer(format!("Failed to create PASETO claims: {}", e)))?;
+        if self.config.use_local_tokens {
+            pasetors::local::encrypt(&self.local_key, &paseto_claims, None, None)
+                .map_err(|e| AppError::InternalServer(format!("PASETO encryption failed: {}", e)))
+        } else {
+            if let Some(private_key) = &self.private_key {
+                pasetors::public::sign(private_key, &paseto_claims, None, None)
+                    .map_err(|e| AppError::InternalServer(format!("PASETO signing failed: {}", e)))
+            } else {
+                Err(AppError::InternalServer("Private key not available for public tokens".to_string()))
+            }
+        }
+    }
+
+    /// Helper: decrypt/verify token and return raw claims JSON
+    fn decode_token(&self, token: &str) -> AppResult<String> {
+        if self.config.use_local_tokens {
+            let untrusted_token = UntrustedToken::<Local, V4>::try_from(token)
+                .map_err(|e| AppError::Unauthorized(format!("Invalid local token format: {}", e)))?;
+            let validation_rules = ClaimsValidationRules::new();
+            let trusted_token = pasetors::local::decrypt(&self.local_key, &untrusted_token, &validation_rules, None, None)
+                .map_err(|e| AppError::Unauthorized(format!("Token decryption failed: {}", e)))?;
+            String::from_utf8(trusted_token.payload().as_bytes().to_vec())
+                .map_err(|e| AppError::Unauthorized(format!("Invalid token payload: {}", e)))
+        } else {
+            let untrusted_token = UntrustedToken::<Public, V4>::try_from(token)
+                .map_err(|e| AppError::Unauthorized(format!("Invalid public token format: {}", e)))?;
+            if let Some(public_key) = &self.public_key {
+                let validation_rules = ClaimsValidationRules::new();
+                let trusted_token = pasetors::public::verify(public_key, &untrusted_token, &validation_rules, None, None)
+                    .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?;
+                String::from_utf8(trusted_token.payload().as_bytes().to_vec())
+                    .map_err(|e| AppError::Unauthorized(format!("Invalid token payload: {}", e)))
+            } else {
+                Err(AppError::InternalServer("Public key not available for token verification".to_string()))
+            }
+        }
+    }
+
+    /// Create PASETO token for user (legacy: creates access token only)
     pub async fn create_paseto_token(
         &self,
         user: &User,
@@ -199,6 +262,7 @@ impl PasetoSecurityService {
             iss: "terra-siaga-auth".to_string(),
             jti: token_id.clone(),
             scope: permissions.clone(),
+            token_type: Some("access".to_string()),
         };
 
         // Store session in cache
@@ -217,6 +281,8 @@ impl PasetoSecurityService {
             permissions,
             is_elevated: false,
             mfa_verified: false, // Should be set based on actual MFA verification
+            refresh_token_id: None,
+            refresh_expires_at: None,
         };
 
         let session_key = format!("session:{}", session_id);
@@ -229,56 +295,23 @@ impl PasetoSecurityService {
         let claims_json = serde_json::to_string(&claims)
             .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?;
 
-
-        let paseto_claims = Claims::from_bytes(claims_json.as_bytes()).map_err(|e| AppError::InternalServer(format!("Failed to create PASETO claims: {}", e)))?;
-        let token = if self.config.use_local_tokens {
-            // Use encrypted local tokens (v4.local)
-            pasetors::local::encrypt(&self.local_key, &paseto_claims, None, None)
-                .map_err(|e| AppError::InternalServer(format!("PASETO encryption failed: {}", e)))?
-        } else {
-            // Use signed public tokens (v4.public)
-            if let Some(private_key) = &self.private_key {
-                pasetors::public::sign(private_key, &paseto_claims, None, None)
-                    .map_err(|e| AppError::InternalServer(format!("PASETO signing failed: {}", e)))?
-            } else {
-                return Err(AppError::InternalServer("Private key not available for public tokens".to_string()));
-            }
-        };
+        let token = self.encode_claims(&claims_json)?;
 
         Ok(token)
     }
 
-    /// Validate PASETO token and return session
+    /// Validate PASETO token and return session (access tokens only)
     pub async fn validate_paseto_token(&self, token: &str) -> AppResult<SecureAuthSession> {
-        let trusted_token = if self.config.use_local_tokens {
-            // Parse as local token and decrypt
-            let untrusted_token = UntrustedToken::<Local, V4>::try_from(token)
-                .map_err(|e| AppError::Unauthorized(format!("Invalid local token format: {}", e)))?;
-
-            // Decrypt local token with proper parameters
-            let validation_rules = ClaimsValidationRules::new();
-            pasetors::local::decrypt(&self.local_key, &untrusted_token, &validation_rules, None, None)
-                .map_err(|e| AppError::Unauthorized(format!("Token decryption failed: {}", e)))?
-        } else {
-            // Parse as public token and verify
-            let untrusted_token = UntrustedToken::<Public, V4>::try_from(token)
-                .map_err(|e| AppError::Unauthorized(format!("Invalid public token format: {}", e)))?;
-
-            if let Some(public_key) = &self.public_key {
-                let validation_rules = ClaimsValidationRules::new();
-                pasetors::public::verify(public_key, &untrusted_token, &validation_rules, None, None)
-                    .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?
-            } else {
-                return Err(AppError::InternalServer("Public key not available for token verification".to_string()));
-            }
-        };
-
-        // Parse claims from payload
-        let claims_str = String::from_utf8(trusted_token.payload().as_bytes().to_vec())
-            .map_err(|e| AppError::Unauthorized(format!("Invalid token payload: {}", e)))?;
-        
+        let claims_str = self.decode_token(token)?;
         let claims: PasetoTokenClaims = serde_json::from_str(&claims_str)
             .map_err(|e| AppError::Unauthorized(format!("Invalid token claims: {}", e)))?;
+
+        // For backward compatibility, None => treat as access token
+        if let Some(ref t) = claims.token_type {
+            if t != "access" {
+                return Err(AppError::Unauthorized("Invalid token type for this endpoint".to_string()));
+            }
+        }
 
         // Validate expiration
         let exp_time = DateTime::parse_from_rfc3339(&claims.exp)
@@ -303,7 +336,7 @@ impl PasetoSecurityService {
             return Err(AppError::Unauthorized("Session expired".to_string()));
         }
 
-        // Validate token ID matches
+        // Validate token ID matches (access token)
         if session.token_id != claims.jti {
             return Err(AppError::Unauthorized("Token ID mismatch".to_string()));
         }
@@ -315,6 +348,209 @@ impl PasetoSecurityService {
         self.cache.set_string(&session_key, updated_session_json, Some(Duration::from_secs(self.config.session_timeout_hours * 3600))).await?;
 
         Ok(session)
+    }
+
+    /// Create a pair of access and refresh tokens and persist session state
+    pub async fn create_token_pair(
+        &self,
+        user: &User,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+        device_fingerprint: Option<String>,
+    ) -> AppResult<AuthTokenPair> {
+        let session_id = Self::generate_session_id();
+        let access_jti = Self::generate_token_id();
+        let refresh_jti = Self::generate_token_id();
+        let now = Utc::now();
+        let access_exp = now + ChronoDuration::minutes(self.config.access_token_ttl_minutes as i64);
+        let refresh_exp = now + ChronoDuration::days(self.config.refresh_token_ttl_days as i64);
+
+        let permissions = Self::get_user_permissions(user.role());
+
+        // Access claims
+        let access_claims = PasetoTokenClaims {
+            sub: user.id().to_string(),
+            email: user.email().value().to_string(),
+            role: format!("{:?}", user.role()),
+            session_id: session_id.clone(),
+            iat: now.to_rfc3339(),
+            exp: access_exp.to_rfc3339(),
+            aud: "terra-siaga".to_string(),
+            iss: "terra-siaga-auth".to_string(),
+            jti: access_jti.clone(),
+            scope: permissions.clone(),
+            token_type: Some("access".to_string()),
+        };
+
+        // Refresh claims (minimal scope)
+        let refresh_claims = PasetoTokenClaims {
+            sub: user.id().to_string(),
+            email: user.email().value().to_string(),
+            role: format!("{:?}", user.role()),
+            session_id: session_id.clone(),
+            iat: now.to_rfc3339(),
+            exp: refresh_exp.to_rfc3339(),
+            aud: "terra-siaga".to_string(),
+            iss: "terra-siaga-auth".to_string(),
+            jti: refresh_jti.clone(),
+            scope: vec!["refresh".to_string()],
+            token_type: Some("refresh".to_string()),
+        };
+
+        // Persist session
+        let session = SecureAuthSession {
+            user_id: user.id.clone(),
+            email: user.email().clone(),
+            role: user.role().clone(),
+            session_id: session_id.clone(),
+            token_id: access_jti.clone(),
+            created_at: now,
+            // Session lifetime bound to refresh lifetime or configured timeout, whichever is sooner
+            expires_at: refresh_exp.min(now + ChronoDuration::hours(self.config.session_timeout_hours as i64)),
+            last_activity: now,
+            ip_address,
+            user_agent,
+            device_fingerprint,
+            permissions,
+            is_elevated: false,
+            mfa_verified: false,
+            refresh_token_id: Some(refresh_jti.clone()),
+            refresh_expires_at: Some(refresh_exp),
+        };
+
+        let session_key = format!("session:{}", session_id);
+        let session_json = serde_json::to_string(&session)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize session: {}", e)))?;
+        // TTL up to refresh token expiry (fallback to session_timeout_hours)
+        let ttl_secs = (session.expires_at - now).num_seconds().max(0) as u64;
+        let ttl = if ttl_secs == 0 { Some(self.config.session_timeout_hours * 3600) } else { Some(ttl_secs) };
+        self.cache.set_string(&session_key, session_json, ttl.map(Duration::from_secs)).await?;
+
+        // Encode tokens
+        let access_token = self.encode_claims(&serde_json::to_string(&access_claims)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?)?;
+        let refresh_token = self.encode_claims(&serde_json::to_string(&refresh_claims)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?)?;
+
+        Ok(AuthTokenPair { access_token, refresh_token, session_id, access_expires_at: access_exp, refresh_expires_at: refresh_exp })
+    }
+
+    /// Validate refresh token and return session
+    pub async fn validate_refresh_token(&self, token: &str) -> AppResult<SecureAuthSession> {
+        let claims_str = self.decode_token(token)?;
+        let claims: PasetoTokenClaims = serde_json::from_str(&claims_str)
+            .map_err(|e| AppError::Unauthorized(format!("Invalid token claims: {}", e)))?;
+
+        // Must be refresh token
+        match claims.token_type.as_deref() {
+            Some("refresh") => {},
+            _ => return Err(AppError::Unauthorized("Invalid token type for refresh".to_string())),
+        }
+
+        // Validate expiration
+        let exp_time = DateTime::parse_from_rfc3339(&claims.exp)
+            .map_err(|e| AppError::Unauthorized(format!("Invalid expiration time: {}", e)))?
+            .with_timezone(&Utc);
+        if exp_time < Utc::now() {
+            return Err(AppError::Unauthorized("Refresh token expired".to_string()));
+        }
+
+        // Ensure session exists
+        let session_key = format!("session:{}", claims.session_id);
+        let session_json: String = self.cache.get_string(&session_key).await?
+            .ok_or_else(|| AppError::Unauthorized("Session not found".to_string()))?;
+        let session: SecureAuthSession = serde_json::from_str(&session_json)
+            .map_err(|e| AppError::InternalServer(format!("Failed to deserialize session: {}", e)))?;
+
+        // Ensure session is not expired
+        if session.expires_at < Utc::now() {
+            self.cache.delete(&session_key).await?;
+            return Err(AppError::Unauthorized("Session expired".to_string()));
+        }
+
+        // Validate refresh token id
+        match (&session.refresh_token_id, &session.refresh_expires_at) {
+            (Some(rid), Some(r_exp)) => {
+                if rid != &claims.jti { return Err(AppError::Unauthorized("Refresh token ID mismatch".to_string())); }
+                if *r_exp < Utc::now() { return Err(AppError::Unauthorized("Refresh token expired".to_string())); }
+            },
+            _ => return Err(AppError::Unauthorized("No refresh token bound to session".to_string())),
+        }
+
+        Ok(session)
+    }
+
+    /// Exchange a refresh token for a new access token (and rotated refresh token)
+    pub async fn refresh_access_token(&self, refresh_token: &str, rotate: bool) -> AppResult<AuthTokenPair> {
+        let mut session = self.validate_refresh_token(refresh_token).await?;
+        let now = Utc::now();
+
+        // Generate new access token
+        let new_access_jti = Self::generate_token_id();
+        let access_exp = now + ChronoDuration::minutes(self.config.access_token_ttl_minutes as i64);
+
+        let access_claims = PasetoTokenClaims {
+            sub: session.user_id.to_string(),
+            email: session.email.value().to_string(),
+            role: format!("{:?}", session.role),
+            session_id: session.session_id.clone(),
+            iat: now.to_rfc3339(),
+            exp: access_exp.to_rfc3339(),
+            aud: "terra-siaga".to_string(),
+            iss: "terra-siaga-auth".to_string(),
+            jti: new_access_jti.clone(),
+            scope: session.permissions.clone(),
+            token_type: Some("access".to_string()),
+        };
+
+        let access_token = self.encode_claims(&serde_json::to_string(&access_claims)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?)?;
+
+        let (refresh_token_str, refresh_exp) = if rotate {
+            let new_refresh_jti = Self::generate_token_id();
+            let new_refresh_exp = session.refresh_expires_at.unwrap_or(now + ChronoDuration::days(self.config.refresh_token_ttl_days as i64));
+            let refresh_claims = PasetoTokenClaims {
+                sub: session.user_id.to_string(),
+                email: session.email.value().to_string(),
+                role: format!("{:?}", session.role),
+                session_id: session.session_id.clone(),
+                iat: now.to_rfc3339(),
+                exp: new_refresh_exp.to_rfc3339(),
+                aud: "terra-siaga".to_string(),
+                iss: "terra-siaga-auth".to_string(),
+                jti: new_refresh_jti.clone(),
+                scope: vec!["refresh".to_string()],
+                token_type: Some("refresh".to_string()),
+            };
+            let tok = self.encode_claims(&serde_json::to_string(&refresh_claims)
+                .map_err(|e| AppError::InternalServer(format!("Failed to serialize claims: {}", e)))?)?;
+            // Update session with rotated refresh
+            session.refresh_token_id = Some(new_refresh_jti);
+            session.refresh_expires_at = Some(new_refresh_exp);
+            (tok, new_refresh_exp)
+        } else {
+            // Keep existing refresh token
+            (refresh_token.to_string(), session.refresh_expires_at.unwrap_or(now))
+        };
+
+        // Update session access token id and last activity
+        session.token_id = new_access_jti;
+        session.last_activity = now;
+
+        let session_key = format!("session:{}", session.session_id);
+        let updated_session_json = serde_json::to_string(&session)
+            .map_err(|e| AppError::InternalServer(format!("Failed to serialize session: {}", e)))?;
+        let ttl_secs = (session.expires_at - now).num_seconds().max(0) as u64;
+        let ttl = if ttl_secs == 0 { Some(self.config.session_timeout_hours * 3600) } else { Some(ttl_secs) };
+        self.cache.set_string(&session_key, updated_session_json, ttl.map(Duration::from_secs)).await?;
+
+        Ok(AuthTokenPair {
+            access_token,
+            refresh_token: refresh_token_str,
+            session_id: session.session_id,
+            access_expires_at: access_exp,
+            refresh_expires_at: refresh_exp,
+        })
     }
 
     /// Create elevated session for sensitive operations
