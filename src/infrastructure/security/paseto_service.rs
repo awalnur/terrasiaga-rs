@@ -29,6 +29,7 @@ pub struct PasetoTokenClaims {
     pub aud: String,        // Audience
     pub iss: String,        // Issuer
     pub jti: String,        // JWT ID (unique token identifier)
+    pub nbf: String,
     pub scope: Vec<String>, // Token scopes/permissions
     // Added token_type for distinguishing access vs refresh (None => legacy access)
     pub token_type: Option<String>,
@@ -216,6 +217,7 @@ impl PasetoSecurityService {
             let untrusted_token = UntrustedToken::<Local, V4>::try_from(token)
                 .map_err(|e| AppError::Unauthorized(format!("Invalid local token format: {}", e)))?;
             let validation_rules = ClaimsValidationRules::new();
+
             let trusted_token = pasetors::local::decrypt(&self.local_key, &untrusted_token, &validation_rules, None, None)
                 .map_err(|e| AppError::Unauthorized(format!("Token decryption failed: {}", e)))?;
             String::from_utf8(trusted_token.payload().as_bytes().to_vec())
@@ -261,6 +263,7 @@ impl PasetoSecurityService {
             aud: "terra-siaga".to_string(),
             iss: "terra-siaga-auth".to_string(),
             jti: token_id.clone(),
+            nbf: now.to_rfc3339(),
             scope: permissions.clone(),
             token_type: Some("access".to_string()),
         };
@@ -378,6 +381,7 @@ impl PasetoSecurityService {
             aud: "terra-siaga".to_string(),
             iss: "terra-siaga-auth".to_string(),
             jti: access_jti.clone(),
+            nbf: now.to_rfc3339(),
             scope: permissions.clone(),
             token_type: Some("access".to_string()),
         };
@@ -393,6 +397,7 @@ impl PasetoSecurityService {
             aud: "terra-siaga".to_string(),
             iss: "terra-siaga-auth".to_string(),
             jti: refresh_jti.clone(),
+            nbf: now.to_rfc3339(),
             scope: vec!["refresh".to_string()],
             token_type: Some("refresh".to_string()),
         };
@@ -499,6 +504,7 @@ impl PasetoSecurityService {
             aud: "terra-siaga".to_string(),
             iss: "terra-siaga-auth".to_string(),
             jti: new_access_jti.clone(),
+            nbf: now.to_rfc3339(),
             scope: session.permissions.clone(),
             token_type: Some("access".to_string()),
         };
@@ -519,6 +525,7 @@ impl PasetoSecurityService {
                 aud: "terra-siaga".to_string(),
                 iss: "terra-siaga-auth".to_string(),
                 jti: new_refresh_jti.clone(),
+                nbf: now.to_rfc3339(),
                 scope: vec!["refresh".to_string()],
                 token_type: Some("refresh".to_string()),
             };

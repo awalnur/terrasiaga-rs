@@ -1,15 +1,17 @@
 /// Enhanced authentication API endpoints with PASETO support
 /// Provides secure login, registration, and session management
 
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse, Result};
+use actix_web::{web, App, HttpMessage, HttpRequest, HttpResponse, Result};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+use crate::AppError;
 use crate::application::ValidatedUseCase;
 use crate::infrastructure::{
     container::AppContainer,
     security::{SecureAuthSession},
 };
 use crate::domain::value_objects::{Email, UserRole as DomainUserRole};
+use crate::middleware::AuthMiddleware;
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct LoginRequest {
@@ -106,21 +108,22 @@ pub async fn login(
 
     // Extract client information
     let ip_address = req.peer_addr().map(|addr| addr.ip().to_string());
+
     let user_agent = req.headers()
         .get("User-Agent")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-
+    println!("User-Agent: {}", user_agent.clone().unwrap_or_else(|| "None".to_string()));
     // Check rate limiting and account lockout
-    let email_for_check = &login_req.email;
-    if let Ok(false) = container.auth_service.is_account_locked(email_for_check, ip_address.as_deref()).await {
-        // Account is locked
-        return Ok(HttpResponse::TooManyRequests().json(AuthResponse {
-            success: false,
-            message: "Account temporarily locked due to too many failed attempts".to_string(),
-            data: None,
-        }));
-    }
+    // let email_for_check = &login_req.email;
+    // if let Ok(false) = container.auth_service.is_account_locked(email_for_check, ip_address.as_deref()).await {
+    //     // Account is locked
+    //     return Ok(HttpResponse::TooManyRequests().json(AuthResponse {
+    //         success: false,
+    //         message: "Account temporarily locked due to too many failed attempts".to_string(),
+    //         data: None,
+    //     }));
+    // }
 
     // Find user by email
     let email = match Email::new(login_req.email.clone()) {
@@ -198,14 +201,15 @@ pub async fn login(
             }));
         }
     };
-
+    println!("Token: {}", token);
     // Get session for response
     let session = match container.paseto_service.validate_paseto_token(&token).await {
         Ok(session) => session,
-        Err(_) => {
-            return Ok(HttpResponse::InternalServerError().json(AuthResponse {
+        Err(AppError) => {
+            println!("Failed to validate token {}", AppError);
+            return Ok(HttpResponse::Unauthorized().json(AuthResponse {
                 success: false,
-                message: "Failed to create session".to_string(),
+                message: "Invalid authentication token".to_string(),
                 data: None,
             }));
         }
@@ -474,7 +478,7 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
         .route("/register", web::post().to(register))
         .route("/refresh", web::post().to(refresh_token))
         .route("/logout", web::post().to(logout))
-        .route("/me", web::get().to(me))
+        .route("/me", web::get().to(me).wrap(AuthMiddleware::new()))
         .route("/change-password", web::post().to(change_password))
         .route("/reset-password", web::post().to(reset_password))
         .route("/confirm-reset-password", web::post().to(confirm_reset_password))

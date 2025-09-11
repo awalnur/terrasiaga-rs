@@ -16,9 +16,10 @@ use terra_siaga::{
 use terra_siaga::infrastructure::{HealthService, PasetoSecurityService};
 use terra_siaga::infrastructure::monitoring::{DatabaseHealthChecker, CacheHealthChecker};
 use terra_siaga::infrastructure::database::DbPool;
-use terra_siaga::middleware::ErrorHandler;
+use terra_siaga::middleware::{AuthMiddleware, ErrorHandler};
 // Add imports for JSON error handling
 use actix_web::error::JsonPayloadError;
+use terra_siaga::middleware::auth::AuthMiddlewareService;
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,11 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     info!("💊 Health monitoring service configured");
-
+    let passeto_c = container.paseto_service().clone();
     // Prepare shared app data
     let app_data = web::Data::new(container);
     let health_data = web::Data::new(Arc::new(health_service));
-
+    let passeto_service = web::Data::new(passeto_c);
     // Extract CORS origins to avoid lifetime issues (not required by current CORS config)
     // let cors_origins = config.server.cors_origins.clone();
     let server_config = config.server.clone();
@@ -107,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Inject dependencies
             .app_data(app_data.clone())
             .app_data(health_data.clone())
+            .app_data(passeto_service.clone())
             // Configure JSON extractor to return consistent JSON errors
             .app_data(
                 web::JsonConfig::default()
@@ -138,8 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .add(("X-Version", env!("CARGO_PKG_VERSION")))
                     .add(("X-Service", "terra-siaga"))
             )
+            // .wrap(terra_siaga::middleware::AuthMiddleware::new())
             .wrap(cors::configure_cors())
-            .wrap(ErrorHandler::new())
+            // .wrap(ErrorHandler::new())
 
             // Security headers
             .wrap(

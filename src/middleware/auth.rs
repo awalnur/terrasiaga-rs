@@ -11,7 +11,8 @@ use std::future::{ready, Ready};
 use std::sync::Arc;
 use std::rc::Rc;
 use tracing::{error, warn, debug};
-use crate::infrastructure::PasetoSecurityService;
+use crate::infrastructure::security::paseto_service::PasetoSecurityService;
+use crate::infrastructure::security::SecureAuthSession;
 use crate::shared::types::{UserRole, UserId};
 use crate::shared::error::AppError;
 
@@ -26,7 +27,7 @@ pub struct AuthSession {
     pub ip_address: Option<String>,
 }
 
-impl AuthSession {
+impl SecureAuthSession {
     /// Check if user has specific permission
     pub fn has_permission(&self, permission: &str) -> bool {
         self.permissions.contains(&permission.to_string())
@@ -174,13 +175,24 @@ where
             };
 
             // Build AuthSession
-            let auth_session = AuthSession {
+            let auth_session = SecureAuthSession {
                 user_id: session.user_id.clone(),
+                email: session.email,
                 role: session.role.clone(),
                 permissions: session.permissions.clone(),
+                is_elevated: false,
+                mfa_verified: false,
+                refresh_token_id: None,
                 session_id: session.session_id.clone(),
+                token_id: "".to_string(),
+                created_at: Default::default(),
+                expires_at: Default::default(),
                 device_fingerprint: session.device_fingerprint.clone(),
                 ip_address: session.ip_address.clone(),
+
+                last_activity: Default::default(),
+                user_agent: None,
+                refresh_expires_at: None,
             };
 
             // Enforce role and permission requirements if configured
@@ -237,12 +249,12 @@ pub fn require_permissions(permissions: Vec<&str>) -> AuthMiddleware {
 }
 
 // FromRequest implementation for AuthSession
-impl FromRequest for AuthSession {
+impl FromRequest for SecureAuthSession {
     type Error = actix_web::Error;
     type Future = Ready<Result<Self, Self::Error>>;
 
     fn from_request(req: &actix_web::HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
-        if let Some(session) = req.extensions().get::<AuthSession>() {
+        if let Some(session) = req.extensions().get::<SecureAuthSession>() {
             ready(Ok(session.clone()))
         } else {
             ready(Err(actix_web::error::ErrorUnauthorized("No authentication session found")))
