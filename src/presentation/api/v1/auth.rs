@@ -115,15 +115,15 @@ pub async fn login(
         .map(|s| s.to_string());
     println!("User-Agent: {}", user_agent.clone().unwrap_or_else(|| "None".to_string()));
     // Check rate limiting and account lockout
-    // let email_for_check = &login_req.email;
-    // if let Ok(false) = container.auth_service.is_account_locked(email_for_check, ip_address.as_deref()).await {
-    //     // Account is locked
-    //     return Ok(HttpResponse::TooManyRequests().json(AuthResponse {
-    //         success: false,
-    //         message: "Account temporarily locked due to too many failed attempts".to_string(),
-    //         data: None,
-    //     }));
-    // }
+    let email_for_check = &login_req.email;
+    if let Ok(false) = container.auth_service.is_account_locked(email_for_check, ip_address.as_deref()).await {
+        // Account is locked
+        return Ok(HttpResponse::TooManyRequests().json(AuthResponse {
+            success: false,
+            message: "Account temporarily locked due to too many failed attempts".to_string(),
+            data: None,
+        }));
+    }
 
     // Find user by email
     let email = match Email::new(login_req.email.clone()) {
