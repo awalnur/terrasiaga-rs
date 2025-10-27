@@ -32,7 +32,8 @@ where
     let data: T = serde_json::from_str(json_str)
         .map_err(|e| AppError::Validation(format!("Invalid JSON: {}", e)))?;
 
-    validate_request(&data)?;
+    validate_request(&data).unwrap_or_else(|e|
+        panic!("Validation failed: {}", e));
     Ok(data)
 }
 

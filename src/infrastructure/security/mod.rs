@@ -6,7 +6,7 @@ pub mod paseto_service;
 
 // Re-export security services
 pub use service::ProductionSecurityService;
-pub use paseto_service::{PasetoSecurityService, PasetoConfig, SecureAuthSession};
+pub use paseto_service::{PasetoSecurityService, PasetoConfig, SecureAuthSession, AuthTokenPair};
 
 use crate::shared::AppResult;
 

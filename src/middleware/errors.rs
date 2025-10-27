@@ -57,22 +57,19 @@ where
                     let status = res.status();
 
                     if status.is_client_error() || status.is_server_error() {
+                        // Let 400 Bad Request (e.g., JSON deserialization) pass through to preserve detailed message
+                        if status.as_u16() == 400 {
+                            return Ok(res.map_into_left_body());
+                        }
+
                         let error_response = match status.as_u16() {
-                            400 => HttpResponse::BadRequest().json(json!({
-                                "error": "Bad Request",
-                                "message": "Invalid request parameters",
-                                "status": 400
-                            })),
-                            401 => HttpResponse::Unauthorized().json(json!({
-                                "error": "Unauthorized",
-                                "message": "Authentication required",
-                                "status": 401
-                            })),
+                            401 => AppError::Unauthorized("Unauthorized".to_string()).error_response(),
                             403 => HttpResponse::Forbidden().json(json!({
                                 "error": "Forbidden",
                                 "message": "Access denied",
                                 "status": 403
                             })),
+
                             404 => AppError::NotFound("Resource Not Found".to_string()).error_response(),
                             500 => {
                                 error!("Internal server error occurred");
@@ -89,15 +86,15 @@ where
                             }))
                         };
 
-                        Ok(res.map_body(|_, _| EitherBody::right(error_response.into_body())))
+                        // Replace entire response to keep headers/body consistent
+                        let new_res = res.into_response(error_response.map_into_right_body());
+                        Ok(new_res)
                     } else {
-                        Ok(res.map_body(|_, body| EitherBody::left(body)))
+                        Ok(res.map_into_left_body())
                     }
                 },
                 Err(err) => {
                     error!("Service error: {}", err);
-
-                    // Return the original error instead of trying to wrap HttpResponse
                     Err(err)
                 }
             }

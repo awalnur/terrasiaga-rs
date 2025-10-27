@@ -1,0 +1,1426 @@
+openapi: 3.0.3
+info:
+  title: Terra Siaga API
+  description: |
+    Emergency Response System API (v1) for Terra Siaga.
+
+    Notes
+    - Authentication uses Bearer tokens (PASETO). Public endpoints are marked with `security: []`.
+    - Base path is `/api/v1` for versioned endpoints. Health endpoints are at the root.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local dev
+  - url: https://api.terra-siaga.example.com
+    description: Production (example)
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+  - name: Auth
+  - name: Users
+  - name: Disasters
+  - name: Locations
+  - name: Notifications
+  - name: Analytics
+  - name: Emergency
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: Service healthy or degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatusResponse'
+        '503':
+          description: Service unhealthy or critical
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatusResponse'
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      security: []
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /live:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      security: []
+      responses:
+        '200':
+          description: Alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '503':
+          description: Dead
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Lightweight status metrics snapshot
+      security: []
+      responses:
+        '200':
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  collected_at:
+                    type: string
+                    format: date-time
+  /api/v1/status:
+    get:
+      tags: [Health]
+      summary: API v1 status
+      security: []
+      responses:
+        '200':
+          description: Running
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login (PASETO)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout
+      responses:
+        '200':
+          description: Logged out (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user session info
+      responses:
+        '200':
+          description: Session info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+  /api/v1/auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /api/v1/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Request password reset
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Email sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /api/v1/auth/confirm-reset-password:
+    post:
+      tags: [Auth]
+      summary: Confirm password reset
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmResetPasswordRequest'
+      responses:
+        '200':
+          description: Reset confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+  /api/v1/auth/verify-email/{token}:
+    get:
+      tags: [Auth]
+      summary: Verify email
+      security: []
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Verified
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Resend verification email
+      responses:
+        '200':
+          description: Sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: List users
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: role
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+      responses:
+        '200':
+          description: Users list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/{user_id}:
+    get:
+      tags: [Users]
+      summary: Get user by ID
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+    put:
+      tags: [Users]
+      summary: Update user profile
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateUserProfileRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+    delete:
+      tags: [Users]
+      summary: Delete user
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/{user_id}/role:
+    put:
+      tags: [Users]
+      summary: Update user role
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateUserRoleRequest' }
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/{user_id}/suspend:
+    post:
+      tags: [Users]
+      summary: Suspend user
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Suspended
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/{user_id}/activate:
+    post:
+      tags: [Users]
+      summary: Activate user
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Activated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/{user_id}/activity:
+    get:
+      tags: [Users]
+      summary: Get user activity
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Activity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/{user_id}/reports:
+    get:
+      tags: [Users]
+      summary: Get user reports
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Reports
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/users/stats:
+    get:
+      tags: [Users]
+      summary: Users statistics
+      responses:
+        '200':
+          description: Statistics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+
+  /api/v1/disasters:
+    post:
+      tags: [Disasters]
+      summary: Create disaster report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDisasterRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+    get:
+      tags: [Disasters]
+      summary: List disasters
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: severity
+          schema: { type: string }
+        - in: query
+          name: disaster_type
+          schema: { type: string }
+        - in: query
+          name: location
+          schema: { type: string }
+        - in: query
+          name: date_from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: date_to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: radius
+          schema: { type: number, format: float }
+      responses:
+        '200':
+          description: List
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/disasters/{disaster_id}:
+    get:
+      tags: [Disasters]
+      summary: Get disaster by ID
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      responses:
+        '200':
+          description: Details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+    put:
+      tags: [Disasters]
+      summary: Update disaster
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateDisasterRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+    delete:
+      tags: [Disasters]
+      summary: Delete disaster
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/disasters/{disaster_id}/assign:
+    post:
+      tags: [Disasters]
+      summary: Assign responder
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignResponderRequest' }
+      responses:
+        '200':
+          description: Assigned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+  /api/v1/disasters/{disaster_id}/verify:
+    post:
+      tags: [Disasters]
+      summary: Verify disaster
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      responses:
+        '200': { description: Verified }
+  /api/v1/disasters/{disaster_id}/resolve:
+    post:
+      tags: [Disasters]
+      summary: Resolve disaster
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      responses:
+        '200': { description: Resolved }
+  /api/v1/disasters/{disaster_id}/responders:
+    get:
+      tags: [Disasters]
+      summary: Get assigned responders
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      responses:
+        '200': { description: Responders list }
+  /api/v1/disasters/{disaster_id}/timeline:
+    get:
+      tags: [Disasters]
+      summary: Get disaster timeline
+      parameters:
+        - $ref: '#/components/parameters/DisasterId'
+      responses:
+        '200': { description: Timeline }
+  /api/v1/disasters/nearby:
+    get:
+      tags: [Disasters]
+      summary: Nearby disasters
+      parameters:
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+        - in: query
+          name: radius
+          schema: { type: number, format: float, default: 10 }
+      responses:
+        '200': { description: Nearby list }
+  /api/v1/disasters/active:
+    get:
+      tags: [Disasters]
+      summary: Active disasters
+      responses:
+        '200': { description: Active list }
+  /api/v1/disasters/stats:
+    get:
+      tags: [Disasters]
+      summary: Disaster statistics
+      responses:
+        '200': { description: Stats }
+
+  /api/v1/locations:
+    post:
+      tags: [Locations]
+      summary: Create location
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLocationRequest' }
+      responses:
+        '201': { description: Created }
+    get:
+      tags: [Locations]
+      summary: List locations
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+        - in: query
+          name: radius
+          schema: { type: number, format: float }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: location_type
+          schema: { type: string }
+        - in: query
+          name: province
+          schema: { type: string }
+        - in: query
+          name: city
+          schema: { type: string }
+      responses:
+        '200': { description: List }
+  /api/v1/locations/{location_id}:
+    get:
+      tags: [Locations]
+      summary: Get location by ID
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+      responses:
+        '200': { description: Details }
+    put:
+      tags: [Locations]
+      summary: Update location
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLocationRequest' }
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Locations]
+      summary: Delete location
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+      responses:
+        '200': { description: Deleted }
+  /api/v1/locations/nearby:
+    get:
+      tags: [Locations]
+      summary: Nearby locations
+      parameters:
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+        - in: query
+          name: radius
+          schema: { type: number, format: float, default: 5 }
+      responses:
+        '200': { description: Nearby list }
+  /api/v1/locations/shelters:
+    get:
+      tags: [Locations]
+      summary: Emergency shelters
+      responses:
+        '200': { description: List }
+  /api/v1/locations/hospitals:
+    get:
+      tags: [Locations]
+      summary: Hospitals
+      responses:
+        '200': { description: List }
+  /api/v1/locations/fire-stations:
+    get:
+      tags: [Locations]
+      summary: Fire stations
+      responses:
+        '200': { description: List }
+  /api/v1/locations/police-stations:
+    get:
+      tags: [Locations]
+      summary: Police stations
+      responses:
+        '200': { description: List }
+  /api/v1/locations/geocode:
+    get:
+      tags: [Locations]
+      summary: Geocode address
+      parameters:
+        - in: query
+          name: address
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Geocode result }
+  /api/v1/locations/reverse-geocode:
+    get:
+      tags: [Locations]
+      summary: Reverse geocode
+      parameters:
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+      responses:
+        '200': { description: Result }
+  /api/v1/locations/provinces:
+    get:
+      tags: [Locations]
+      summary: Provinces list
+      responses:
+        '200': { description: List }
+  /api/v1/locations/cities/{province}:
+    get:
+      tags: [Locations]
+      summary: Cities by province
+      parameters:
+        - in: path
+          name: province
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: List }
+
+  /api/v1/notifications:
+    post:
+      tags: [Notifications]
+      summary: Create notification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateNotificationRequest' }
+      responses:
+        '201': { description: Created }
+    get:
+      tags: [Notifications]
+      summary: List notifications (current user)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: notification_type
+          schema: { type: string }
+        - in: query
+          name: priority
+          schema: { type: string }
+        - in: query
+          name: channel
+          schema: { type: string }
+        - in: query
+          name: date_from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: date_to
+          schema: { type: string, format: date-time }
+      responses:
+        '200': { description: List }
+  /api/v1/notifications/{notification_id}:
+    get:
+      tags: [Notifications]
+      summary: Get notification by ID
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '200': { description: Details }
+    put:
+      tags: [Notifications]
+      summary: Update notification
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateNotificationRequest' }
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Notifications]
+      summary: Delete notification
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '200': { description: Deleted }
+  /api/v1/notifications/mark-read:
+    post:
+      tags: [Notifications]
+      summary: Mark notifications as read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MarkAsReadRequest' }
+      responses:
+        '200': { description: Marked }
+  /api/v1/notifications/mark-all-read:
+    post:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      responses:
+        '200': { description: Marked }
+  /api/v1/notifications/unread:
+    get:
+      tags: [Notifications]
+      summary: Get unread notifications
+      responses:
+        '200': { description: List }
+  /api/v1/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Get unread count
+      responses:
+        '200': { description: Count }
+  /api/v1/notifications/{notification_id}/send:
+    post:
+      tags: [Notifications]
+      summary: Send notification now
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '200': { description: Sent }
+  /api/v1/notifications/broadcast/emergency:
+    post:
+      tags: [Notifications]
+      summary: Broadcast emergency alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateNotificationRequest' }
+      responses:
+        '200': { description: Broadcasted }
+  /api/v1/notifications/templates:
+    get:
+      tags: [Notifications]
+      summary: Notification templates
+      responses:
+        '200': { description: Templates }
+  /api/v1/notifications/stats:
+    get:
+      tags: [Notifications]
+      summary: Notification statistics
+      responses:
+        '200': { description: Stats }
+
+  /api/v1/analytics/dashboard:
+    get:
+      tags: [Analytics]
+      summary: Dashboard analytics
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+        - in: query
+          name: location
+          schema: { type: string }
+        - in: query
+          name: disaster_type
+          schema: { type: string }
+        - in: query
+          name: granularity
+          schema: { type: string, enum: [daily, weekly, monthly, yearly] }
+      responses:
+        '200': { description: Data }
+  /api/v1/analytics/disasters/trends:
+    get:
+      tags: [Analytics]
+      summary: Disaster trends analytics
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+      responses:
+        '200': { description: Trends }
+  /api/v1/analytics/response-times:
+    get:
+      tags: [Analytics]
+      summary: Response time analytics
+      responses:
+        '200': { description: Data }
+  /api/v1/analytics/user-activity:
+    get:
+      tags: [Analytics]
+      summary: User activity analytics
+      responses:
+        '200': { description: Data }
+  /api/v1/analytics/geographic:
+    get:
+      tags: [Analytics]
+      summary: Geographic analytics
+      responses:
+        '200': { description: Data }
+  /api/v1/analytics/notifications:
+    get:
+      tags: [Analytics]
+      summary: Notification analytics
+      responses:
+        '200': { description: Data }
+  /api/v1/analytics/performance:
+    get:
+      tags: [Analytics]
+      summary: System performance metrics
+      responses:
+        '200': { description: Data }
+  /api/v1/analytics/reports/generate:
+    post:
+      tags: [Analytics]
+      summary: Generate report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReportRequest' }
+      responses:
+        '200': { description: Accepted }
+  /api/v1/analytics/reports/{report_id}:
+    get:
+      tags: [Analytics]
+      summary: Get report status
+      parameters:
+        - in: path
+          name: report_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Status }
+  /api/v1/analytics/reports/{report_id}/download:
+    get:
+      tags: [Analytics]
+      summary: Download report
+      parameters:
+        - in: path
+          name: report_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: File }
+  /api/v1/analytics/export/disasters:
+    get:
+      tags: [Analytics]
+      summary: Export disaster data (CSV)
+      parameters:
+        - $ref: '#/components/parameters/DateFrom'
+        - $ref: '#/components/parameters/DateTo'
+      responses:
+        '200':
+          description: CSV file
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+  /api/v1/analytics/predictions:
+    get:
+      tags: [Analytics]
+      summary: Disaster predictions
+      responses:
+        '200': { description: Predictions }
+
+  /api/v1/emergency/response:
+    post:
+      tags: [Emergency]
+      summary: Initiate emergency response
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmergencyResponseRequest' }
+      responses:
+        '201': { description: Initiated }
+  /api/v1/emergency/active:
+    get:
+      tags: [Emergency]
+      summary: Get active emergencies
+      responses:
+        '200': { description: Active emergencies }
+  /api/v1/emergency/{emergency_id}:
+    get:
+      tags: [Emergency]
+      summary: Get emergency details
+      parameters:
+        - $ref: '#/components/parameters/EmergencyId'
+      responses:
+        '200': { description: Details }
+  /api/v1/emergency/{emergency_id}/dispatch:
+    post:
+      tags: [Emergency]
+      summary: Dispatch teams to emergency
+      parameters:
+        - $ref: '#/components/parameters/EmergencyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamDispatchRequest' }
+      responses:
+        '200': { description: Dispatched }
+  /api/v1/emergency/{emergency_id}/status:
+    put:
+      tags: [Emergency]
+      summary: Update emergency status
+      parameters:
+        - $ref: '#/components/parameters/EmergencyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusUpdateRequest' }
+      responses:
+        '200': { description: Updated }
+  /api/v1/emergency/teams/available:
+    get:
+      tags: [Emergency]
+      summary: Available teams
+      responses:
+        '200': { description: Teams }
+  /api/v1/emergency/teams/{team_id}:
+    get:
+      tags: [Emergency]
+      summary: Team details
+      parameters:
+        - in: path
+          name: team_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Details }
+  /api/v1/emergency/teams/{team_id}/location:
+    get:
+      tags: [Emergency]
+      summary: Team location
+      parameters:
+        - in: path
+          name: team_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Location }
+  /api/v1/emergency/resources/request:
+    post:
+      tags: [Emergency]
+      summary: Request resources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceRequest' }
+      responses:
+        '201': { description: Requested }
+  /api/v1/emergency/resources/available:
+    get:
+      tags: [Emergency]
+      summary: Available resources
+      responses:
+        '200': { description: Resources }
+  /api/v1/emergency/evacuation/routes:
+    get:
+      tags: [Emergency]
+      summary: Get evacuation routes from coordinates
+      parameters:
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+      responses:
+        '200': { description: Routes }
+  /api/v1/emergency/shelters/nearest:
+    get:
+      tags: [Emergency]
+      summary: Nearest shelters
+      parameters:
+        - $ref: '#/components/parameters/LatParam'
+        - $ref: '#/components/parameters/LngParam'
+      responses:
+        '200': { description: Shelters }
+  /api/v1/emergency/alerts/broadcast:
+    post:
+      tags: [Emergency]
+      summary: Broadcast emergency alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200': { description: Broadcasted }
+  /api/v1/emergency/command-center/status:
+    get:
+      tags: [Emergency]
+      summary: Command center status
+      responses:
+        '200': { description: Status }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: PASETO
+  parameters:
+    PageParam:
+      in: query
+      name: page
+      schema: { type: integer, minimum: 1, default: 1 }
+    LimitParam:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    LatParam:
+      in: query
+      name: lat
+      schema: { type: number, format: float }
+      required: false
+    LngParam:
+      in: query
+      name: lng
+      schema: { type: number, format: float }
+      required: false
+    UserId:
+      in: path
+      name: user_id
+      required: true
+      schema: { type: string }
+    DisasterId:
+      in: path
+      name: disaster_id
+      required: true
+      schema: { type: string }
+    LocationId:
+      in: path
+      name: location_id
+      required: true
+      schema: { type: string }
+    NotificationId:
+      in: path
+      name: notification_id
+      required: true
+      schema: { type: string }
+    EmergencyId:
+      in: path
+      name: emergency_id
+      required: true
+      schema: { type: string }
+    DateFrom:
+      in: query
+      name: date_from
+      schema: { type: string, format: date-time }
+    DateTo:
+      in: query
+      name: date_to
+      schema: { type: string, format: date-time }
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    TooManyRequests:
+      description: Too many requests
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+  schemas:
+    MessageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Operation successful
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: Error message
+    HealthStatusResponse:
+      type: object
+      properties:
+        status: { type: string }
+        timestamp: { type: string, format: date-time }
+        service: { type: string }
+        version: { type: string }
+        uptime_seconds: { type: integer }
+        environment: { type: string }
+        components:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+        device_fingerprint: { type: string }
+        remember_me: { type: boolean }
+    RegisterRequest:
+      type: object
+      required: [email, password, full_name]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+        full_name: { type: string, minLength: 2 }
+        phone_number: { type: string }
+        role:
+          type: string
+          enum: [citizen, volunteer, responder, admin]
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string }
+        new_password: { type: string, minLength: 8 }
+    ResetPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    ConfirmResetPasswordRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token: { type: string }
+        new_password: { type: string, minLength: 8 }
+    RefreshTokenRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    AuthResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        data:
+          type: object
+          nullable: true
+          properties:
+            access_token: { type: string }
+            token_type: { type: string, example: Bearer }
+            expires_in: { type: integer }
+            session_id: { type: string }
+            permissions:
+              type: array
+              items: { type: string }
+            user:
+              type: object
+              properties:
+                id: { type: string }
+                email: { type: string, format: email }
+                full_name: { type: string }
+                role: { type: string }
+                status: { type: string }
+    UpdateUserProfileRequest:
+      type: object
+      properties:
+        full_name: { type: string }
+        phone: { type: string }
+        avatar_url: { type: string }
+        bio: { type: string }
+    UpdateUserRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [admin, responder, citizen, volunteer]
+    CreateDisasterRequest:
+      type: object
+      required: [title, description, disaster_type, severity, latitude, longitude]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        disaster_type: { type: string }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        latitude: { type: number, format: float }
+        longitude: { type: number, format: float }
+        address: { type: string }
+        affected_population: { type: integer }
+        images:
+          type: array
+          items: { type: string }
+        contact_info: { type: string }
+    UpdateDisasterRequest:
+      type: object
+      properties:
+        title: { type: string }
+        description: { type: string }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        status: { type: string, enum: [reported, verified, responding, resolved] }
+        affected_population: { type: integer }
+        response_notes: { type: string }
+    AssignResponderRequest:
+      type: object
+      required: [responder_id]
+      properties:
+        responder_id: { type: string }
+        priority: { type: string, enum: [low, medium, high] }
+        notes: { type: string }
+    CreateLocationRequest:
+      type: object
+      required: [name, address, latitude, longitude, location_type]
+      properties:
+        name: { type: string }
+        address: { type: string }
+        latitude: { type: number, format: float }
+        longitude: { type: number, format: float }
+        location_type: { type: string }
+        description: { type: string }
+        contact_info: { type: string }
+        capacity: { type: integer }
+        operational_hours: { type: string }
+    LocationFilter:
+      type: object
+      required: [latitude, longitude, radius]
+      properties:
+        latitude: { type: number, format: float }
+        longitude: { type: number, format: float }
+        radius: { type: number, format: float }
+    CreateNotificationRequest:
+      type: object
+      required: [title, message, notification_type, priority, target_audience, channels]
+      properties:
+        title: { type: string }
+        message: { type: string }
+        notification_type: { type: string, enum: [alert, info, warning, emergency] }
+        priority: { type: string, enum: [low, medium, high, critical] }
+        target_audience: { type: string, enum: [all, location_based, role_based, specific_users] }
+        recipients:
+          type: array
+          items: { type: string }
+        location_filter: { $ref: '#/components/schemas/LocationFilter' }
+        role_filter: { type: string }
+        scheduled_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        channels:
+          type: array
+          items: { type: string, enum: [push, email, sms, whatsapp] }
+    NotificationSearchQuery:
+      type: object
+      properties:
+        status: { type: string }
+        notification_type: { type: string }
+        priority: { type: string }
+        channel: { type: string }
+        date_from: { type: string, format: date-time }
+        date_to: { type: string, format: date-time }
+        page: { type: integer }
+        limit: { type: integer }
+    MarkAsReadRequest:
+      type: object
+      required: [notification_ids]
+      properties:
+        notification_ids:
+          type: array
+          items: { type: string }
+    AnalyticsQuery:
+      type: object
+      properties:
+        date_from: { type: string, format: date-time }
+        date_to: { type: string, format: date-time }
+        location: { type: string }
+        disaster_type: { type: string }
+        granularity: { type: string, enum: [daily, weekly, monthly, yearly] }
+    ReportRequest:
+      type: object
+      required: [report_type, format, parameters]
+      properties:
+        report_type: { type: string }
+        format: { type: string, enum: [json, csv, pdf] }
+        parameters: { type: object, additionalProperties: true }
+    Coordinates:
+      type: object
+      required: [latitude, longitude]
+      properties:
+        latitude: { type: number, format: float }
+        longitude: { type: number, format: float }
+    EmergencyResponseRequest:
+      type: object
+      required: [disaster_id, response_type, priority, required_resources]
+      properties:
+        disaster_id: { type: string }
+        response_type: { type: string, enum: [evacuation, rescue, medical, fire_suppression] }
+        priority: { type: string, enum: [low, medium, high, critical] }
+        estimated_duration: { type: integer }
+        required_resources:
+          type: array
+          items: { type: string }
+        team_size: { type: integer }
+        special_equipment:
+          type: array
+          items: { type: string }
+        notes: { type: string }
+    TeamDispatchRequest:
+      type: object
+      required: [team_ids, destination, mission_brief]
+      properties:
+        team_ids:
+          type: array
+          items: { type: string }
+        destination: { $ref: '#/components/schemas/Coordinates' }
+        mission_brief: { type: string }
+        estimated_arrival: { type: string, format: date-time }
+        equipment_needed:
+          type: array
+          items: { type: string }
+    ResourceRequest:
+      type: object
+      required: [resource_type, quantity, urgency, location, description]
+      properties:
+        resource_type: { type: string, enum: [vehicle, equipment, personnel] }
+        quantity: { type: integer }
+        urgency: { type: string, enum: [low, medium, high, critical] }
+        location: { $ref: '#/components/schemas/Coordinates' }
+        description: { type: string }
+    StatusUpdateRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [dispatched, en_route, on_scene, completed] }
+        location: { $ref: '#/components/schemas/Coordinates' }
+        progress_notes: { type: string }
+        estimated_completion: { type: string, format: date-time }
+

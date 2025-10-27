@@ -1,7 +1,7 @@
 /// Main application entry point
 /// Sets up the complete application with Clean Architecture and dependency injection
 
-use actix_web::{middleware, web, App, HttpServer};
+use actix_web::{middleware, web, App, HttpServer, ResponseError};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -12,12 +12,14 @@ use terra_siaga::{
     infrastructure::AppContainer,
     presentation::api,
     middleware::{cors, errors as error_middleware},
-    shared::paseto_auth::PasetoService,
 };
-use terra_siaga::infrastructure::HealthService;
+use terra_siaga::infrastructure::{HealthService, PasetoSecurityService};
 use terra_siaga::infrastructure::monitoring::{DatabaseHealthChecker, CacheHealthChecker};
 use terra_siaga::infrastructure::database::DbPool;
-use terra_siaga::middleware::ErrorHandler;
+use terra_siaga::middleware::{AuthMiddleware, ErrorHandler};
+// Add imports for JSON error handling
+use actix_web::error::JsonPayloadError;
+use terra_siaga::middleware::auth::AuthMiddlewareService;
 
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,14 +47,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🌍 Environment: {}", config.environment());
     info!("🖥️  Server: {}:{}", config.server.host, config.server.port);
 
-    // Initialize PASETO authentication service
-    let paseto_key = config.auth.jwt_secret.as_bytes();
-    let paseto_service = Arc::new(PasetoService::new(paseto_key).map_err(|e| {
-        error!("❌ Failed to initialize PASETO service: {}", e);
-        e
-    })?);
-
-    info!("🔐 PASETO authentication service initialized");
 
     // Build application container with all dependencies
     let container = AppContainer::build(&config).await.map_err(|e| {
@@ -88,12 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     info!("💊 Health monitoring service configured");
-
+    let passeto_c = container.paseto_service().clone();
     // Prepare shared app data
     let app_data = web::Data::new(container);
-    let paseto_data = web::Data::new(paseto_service);
     let health_data = web::Data::new(Arc::new(health_service));
-
+    let passeto_service = web::Data::new(passeto_c);
     // Extract CORS origins to avoid lifetime issues (not required by current CORS config)
     // let cors_origins = config.server.cors_origins.clone();
     let server_config = config.server.clone();
@@ -114,8 +107,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         App::new()
             // Inject dependencies
             .app_data(app_data.clone())
-            .app_data(paseto_data.clone())
             .app_data(health_data.clone())
+            .app_data(passeto_service.clone())
+            // Configure JSON extractor to return consistent JSON errors
+            .app_data(
+                web::JsonConfig::default()
+                    .limit(1 << 20) // 1 MiB
+                    .error_handler(|err, _req| {
+                        // Map JSON payload errors to our AppError with 400 status
+                        let message = match &err {
+                            JsonPayloadError::Deserialize(e) => format!("Invalid JSON payload: {}", e),
+                            JsonPayloadError::ContentType => "Unsupported Content-Type. Expecting application/json".to_string(),
+                            JsonPayloadError::OverflowKnownLength { .. } | JsonPayloadError::Overflow { .. } =>
+                                "JSON payload too large".to_string(),
+                            _ => err.to_string(),
+                        };
+                        let app_err = terra_siaga::shared::error::AppError::BadRequest(message);
+                        app_err.into()
+                        // actix_web::error::InternalError::from_response(err, app_err.error_response()).into()
+                    })
+            )
 
             // Global middleware stack (order matters!)
             .wrap(middleware::Logger::new(
@@ -129,8 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .add(("X-Version", env!("CARGO_PKG_VERSION")))
                     .add(("X-Service", "terra-siaga"))
             )
+            // .wrap(terra_siaga::middleware::AuthMiddleware::new())
             .wrap(cors::configure_cors())
-            .wrap(ErrorHandler::new())
+            // .wrap(ErrorHandler::new())
 
             // Security headers
             .wrap(

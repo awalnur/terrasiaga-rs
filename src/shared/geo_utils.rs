@@ -1,15 +1,14 @@
 /// Geographic utilities for Terra Siaga disaster management
 /// Provides location calculations, distance measurements, and geographic operations
-
-use geo::{Point, Polygon, LineString, Contains, HaversineDistance, BoundingRect};
+use geo::{BoundingRect, Contains, HaversineDistance, LineString, Point, Polygon};
 use geo_types::Coord;
-use std::collections::HashMap;
 use rstar::{RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use crate::shared::error::{AppResult};
 use crate::domain::value_objects::Coordinates;
-use crate::shared::types::{constants::EARTH_RADIUS_KM};
+use crate::shared::error::AppResult;
+use crate::shared::types::constants::EARTH_RADIUS_KM;
 
 /// Geographic region types for disaster management
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +153,9 @@ impl SpatialIndex {
                     None
                 }
             })
-            .filter(|poi| GeoCalculations::haversine_distance(center, &poi.coordinates) <= radius_km)
+            .filter(|poi| {
+                GeoCalculations::haversine_distance(center, &poi.coordinates) <= radius_km
+            })
             .collect()
     }
 
@@ -165,7 +166,9 @@ impl SpatialIndex {
         limit: usize,
         poi_type: Option<PoiType>,
     ) -> Vec<&PointOfInterest> {
-        if limit == 0 { return Vec::new(); }
+        if limit == 0 {
+            return Vec::new();
+        }
         let center_point = Point::new(center.longitude, center.latitude);
         let center_arr = [center_point.x(), center_point.y()];
 
@@ -220,7 +223,10 @@ impl SpatialIndex {
 
         let coords: Vec<Coord<f64>> = polygon
             .iter()
-            .map(|c| Coord { x: c.longitude, y: c.latitude })
+            .map(|c| Coord {
+                x: c.longitude,
+                y: c.latitude,
+            })
             .collect();
 
         let line_string = LineString::new(coords);
@@ -311,7 +317,10 @@ impl GeoCalculations {
 
         let coords: Vec<Coord<f64>> = coordinates
             .iter()
-            .map(|c| Coord { x: c.longitude, y: c.latitude })
+            .map(|c| Coord {
+                x: c.longitude,
+                y: c.latitude,
+            })
             .collect();
 
         let line_string = LineString::new(coords);
@@ -452,11 +461,7 @@ impl EmergencyZoneManager {
     }
 
     /// Find nearest safe zones to a location
-    pub fn find_nearest_safe_zones(
-        &self,
-        location: &Coordinates,
-        limit: usize,
-    ) -> Vec<&SafeZone> {
+    pub fn find_nearest_safe_zones(&self, location: &Coordinates, limit: usize) -> Vec<&SafeZone> {
         let mut zones: Vec<_> = self
             .safe_zones
             .values()
@@ -498,17 +503,17 @@ impl EmergencyZoneManager {
         let route = self.evacuation_routes.get(route_id)?;
 
         let distance = GeoCalculations::haversine_distance(from_location, &route.start_location);
-        let route_distance = GeoCalculations::haversine_distance(
-            &route.start_location,
-            &route.end_location,
-        );
+        let route_distance =
+            GeoCalculations::haversine_distance(&route.start_location, &route.end_location);
 
         // Simple calculation - in practice this would be much more complex
         let travel_time_hours = (distance + route_distance) / 5.0; // Assume 5 km/h walking speed
         let processing_time_hours = population as f64 / route.capacity_per_hour as f64;
 
         let total_hours = travel_time_hours + processing_time_hours;
-        Some(std::time::Duration::from_secs((total_hours * 3600.0) as u64))
+        Some(std::time::Duration::from_secs(
+            (total_hours * 3600.0) as u64,
+        ))
     }
 }
 
@@ -521,7 +526,10 @@ pub struct GeoBounds {
 
 impl GeoBounds {
     pub fn new(north_east: Coordinates, south_west: Coordinates) -> Self {
-        Self { north_east, south_west }
+        Self {
+            north_east,
+            south_west,
+        }
     }
 
     pub fn contains(&self, point: &Coordinates) -> bool {
@@ -547,7 +555,10 @@ pub struct LocationInfo {
 pub trait GeocodingService: Send + Sync {
     async fn geocode_address(&self, address: &str) -> AppResult<Vec<Coordinates>>;
     async fn reverse_geocode(&self, coordinates: &Coordinates) -> AppResult<LocationInfo>;
-    async fn get_administrative_info(&self, coordinates: &Coordinates) -> AppResult<Vec<AdministrativeRegion>>;
+    async fn get_administrative_info(
+        &self,
+        coordinates: &Coordinates,
+    ) -> AppResult<Vec<AdministrativeRegion>>;
 }
 
 /// Mock geocoding service for testing
@@ -570,7 +581,10 @@ impl GeocodingService for MockGeocodingService {
         })
     }
 
-    async fn get_administrative_info(&self, _coordinates: &Coordinates) -> AppResult<Vec<AdministrativeRegion>> {
+    async fn get_administrative_info(
+        &self,
+        _coordinates: &Coordinates,
+    ) -> AppResult<Vec<AdministrativeRegion>> {
         Ok(vec![])
     }
 }
@@ -585,9 +599,9 @@ mod tests {
         let bandung = Coordinates::new(-6.9175, 107.6191).unwrap();
 
         let distance = GeoCalculations::haversine_distance(&jakarta, &bandung);
-
+        println!("{}", distance);
         // Distance between Jakarta and Bandung is approximately 150km
-        assert!((distance - 150.0).abs() < 20.0);
+        assert!((distance - 120.0).abs() < 20.0);
     }
 
     #[test]

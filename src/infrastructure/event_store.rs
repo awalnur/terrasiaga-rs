@@ -72,7 +72,7 @@ impl EventStore for PostgresEventStore {
         expected_version: u64,
     ) -> AppResult<()> {
         use self::event_store::dsl::*;
-        
+
         let mut conn = self.pool.get()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -127,7 +127,7 @@ impl EventStore for PostgresEventStore {
         from_version: Option<u64>,
     ) -> AppResult<Vec<Box<dyn DomainEvent>>> {
         use self::event_store::dsl::*;
-        
+
         let mut conn = self.pool.get()
             .map_err(|e| AppError::Database(e.to_string()))?;
 
