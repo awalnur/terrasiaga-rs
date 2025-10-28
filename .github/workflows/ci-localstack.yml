@@ -1,0 +1,51 @@
+name: CI LearnCICD+LocalStack
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,dynamodb
+          AWS_DEFAULT_REGION: ap-southeast-1
+        options: >-
+          --health-cmd="curl -fsS http://localhost:4566/health || exit 1"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-southeast-1
+      AWS_S3_FORCE_PATH_STYLE: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install awslocal (CLI buat LocalStack)
+        run: pipx install awscli-local
+
+      - name: Smoke test LocalStack
+        run: |
+          awslocal s3 mb s3://ci-demo-$RANDOM
+          awslocal s3 ls
+          awslocal dynamodb list-tables
+          
+      - name: Setup Rust
+        if: hashFiles('Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo test
+        if: hashFiles('Cargo.toml') != ''
+        env:
+          AWS_ENDPOINT_URL: http://localhost:4566
+        run: cargo test --all -- --test-threads=1
